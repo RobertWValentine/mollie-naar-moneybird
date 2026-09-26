@@ -1,0 +1,21 @@
+[project]
+name = "mollie-moneybird-sync"
+version = "0.1.0"
+description = "Zet Mollie-transacties als bankafschriften in Moneybird"
+requires-python = ">=3.9"
+dependencies = ["tzdata; platform_system != 'Darwin'"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Expliciet vastgezet, anders hangt de uitkomst af van welke ruff-versie er
+# toevallig geinstalleerd wordt.
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E402",  # future-import staat bewust boven de docstring
+    "E501",  # regellengte staat al op 100 via line-length
+]
