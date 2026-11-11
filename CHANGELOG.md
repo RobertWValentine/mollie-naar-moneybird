@@ -5,6 +5,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [Semantic Vers
 
 ## [Unreleased]
 
+### Fixed
+- Een terugboeking blijft een afschrijving als Mollie geen `settlementAmount` meer meestuurt. Mollie haalt dat veld op 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); het overblijvende `amount` is positief en werd tot nu toe ongewijzigd geboekt, zodat een terugboeking als bijschrijving in Moneybird zou komen. De terugdraaiing blijft een bijschrijving. Test erbij.
+
 ### Changed
 - CI draait nu op Python 3.11 en 3.15. Alle tests slagen op 3.15.2 zonder aanpassing aan de code.
 

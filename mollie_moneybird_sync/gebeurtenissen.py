@@ -86,13 +86,17 @@ def van_chargeback(chargeback: dict) -> list:
     op de chargeback in plaats van er een nieuw record voor te maken.
     """
     reden = chargeback.get("reason") or {}
+    # settlementAmount is negatief, amount positief. Mollie haalt settlementAmount op
+    # 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); daarna komt alleen
+    # amount. De terugboeking is altijd een afschrijving, de terugdraaiing altijd een bijschrijving.
     bedrag = (chargeback.get("settlementAmount") or chargeback["amount"])["value"]
+    positief = float(bedrag) > 0
     tr = chargeback.get("paymentId", "")
     regels = [{
         "sleutel": chargeback["id"],
         "tijd": chargeback["createdAt"],
         "date": lokale_datum(chargeback["createdAt"]),
-        "amount": _bedrag(bedrag),
+        "amount": _bedrag(bedrag, omkeren=positief),
         "message": _samen("Mollie Chargeback", reden.get("code", ""),
                           reden.get("description", ""), chargeback["id"], tr),
     }]
@@ -101,7 +105,7 @@ def van_chargeback(chargeback: dict) -> list:
             "sleutel": f"{chargeback['id']}:teruggedraaid",
             "tijd": chargeback["reversedAt"],
             "date": lokale_datum(chargeback["reversedAt"]),
-            "amount": _bedrag(bedrag, omkeren=True),
+            "amount": _bedrag(bedrag, omkeren=not positief),
             "message": _samen("Mollie Chargeback Reversed", chargeback["id"], tr),
         })
     return regels

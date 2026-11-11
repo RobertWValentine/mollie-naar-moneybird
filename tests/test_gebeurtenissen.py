@@ -131,6 +131,17 @@ def test_chargeback_noemt_reden_en_beide_kenmerken():
     )
 
 
+def test_chargeback_zonder_settlementamount_blijft_een_afschrijving():
+    """Mollie haalt settlementAmount op 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback).
+
+    `amount` is positief; de terugboeking moet toch negatief en de terugdraaiing positief blijven.
+    """
+    zonder = {k: v for k, v in CHARGEBACK.items() if k != "settlementAmount"}
+    regels = van_chargeback(dict(zonder, reversedAt="2026-08-20T09:00:00+00:00"))
+    assert regels[0]["amount"] == "-2.50"
+    assert regels[1]["amount"] == "2.50"
+
+
 def test_refund_is_negatief():
     r = van_refund(REFUND)
     assert r["amount"] == "-5.00"
