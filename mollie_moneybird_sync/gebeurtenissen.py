@@ -22,29 +22,30 @@ Mollie-factuur verwijzen.
 Elke regel krijgt een eigen sleutel, zodat een tweede run hem overslaat.
 """
 
-import logging
-
 from .tijd import lokale_datum
 
-log = logging.getLogger(__name__)
 VALUTA = "EUR"  # de valuta van het Mollie-saldo en van de administratie
 
 
-def _afrekenbedrag(record: dict) -> str | None:
+class NietTeBoeken(ValueError):
+    """Een record dat de import niet veilig kan boeken. `verzamel` vangt het per record,
+    boekt de rest en laat de ronde met exitcode 1 eindigen, zodat de hartslag rood wordt."""
+
+
+def _afrekenbedrag(record: dict) -> str:
     """Wat er van het saldo afgaat: settlementAmount als dat er is, anders amount in euro's.
 
     Mollie haalt settlementAmount bij chargebacks en refunds op 1 januari 2027 weg
     (docs.mollie.com/reference/get-chargeback). Daarna staat bij een andere valuta het
-    eurobedrag alleen nog in de afrekening; zo'n regel boeken we niet en melden we.
+    eurobedrag alleen nog in de afrekening; zo'n record is niet te boeken.
     """
     afgerekend = record.get("settlementAmount")
     if afgerekend:
         return afgerekend["value"]
     bedrag = record["amount"]
     if (bedrag.get("currency") or VALUTA) != VALUTA:
-        log.error("%s in %s zonder settlementAmount: niet geboekt, het eurobedrag staat alleen in de afrekening",
-                  record.get("id"), bedrag.get("currency"))
-        return None
+        raise NietTeBoeken(f"{record.get('id')} in {bedrag.get('currency')} zonder settlementAmount: "
+                           "het eurobedrag staat alleen in de afrekening")
     return bedrag["value"]
 
 
@@ -113,8 +114,6 @@ def van_chargeback(chargeback: dict) -> list:
     # 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); daarna komt alleen
     # amount. De terugboeking is altijd een afschrijving, de terugdraaiing altijd een bijschrijving.
     bedrag = _afrekenbedrag(chargeback)
-    if bedrag is None:
-        return []
     positief = Decimal(str(bedrag)) > 0
     tr = chargeback.get("paymentId", "")
     regels = [{
@@ -151,14 +150,11 @@ def van_refund(refund: dict) -> dict | None:
     if methode == "paypal":
         return None
     if not refund.get("settlementAmount") and methode is None:
-        log.error("%s zonder settlementAmount en zonder betaling: niet te zien of het PayPal is, niet geboekt",
-                  refund.get("id"))
-        return None
+        raise NietTeBoeken(f"{refund.get('id')} zonder settlementAmount en zonder betaling: "
+                           "niet te zien of het PayPal is")
     # settlementAmount is wat er van de balans afgaat; amount is wat de klant
     # krijgt. Bij euro's gelijk, bij vreemde valuta niet.
     bedrag = _afrekenbedrag(refund)
-    if bedrag is None:
-        return None
     getal = Decimal(str(bedrag))
     if getal == 0:
         return None

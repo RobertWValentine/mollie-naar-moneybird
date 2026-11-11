@@ -9,6 +9,7 @@ import os
 from .aansluiten import splits
 from .config import Config
 from .gebeurtenissen import (
+    NietTeBoeken,
     van_afrekening,
     van_betaling,
     van_chargeback,
@@ -94,16 +95,28 @@ class Lock:
             pass
 
 
-def verzamel(mollie: MollieClient, grens: str) -> list:
+def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None) -> list:
     """Haalt alle boekbare gebeurtenissen op vanaf de grensdatum.
 
     Vier bronnen, elk met zijn eigen moment van boeken. Betalingen worden
     opgehaald op aanmaakdatum maar geboekt op betaaldatum; die twee liggen
     doorgaans een dag uit elkaar, dus het venster moet ruimer zijn dan de
     periode die je wilt boeken.
+
+    Een record dat niet veilig te boeken is (NietTeBoeken) komt in `fouten` en de rest
+    gaat gewoon door; de aanroeper laat de ronde daarna met exitcode 1 eindigen.
     """
     regels: list = []
     aantallen: dict = {}
+    fouten = fouten if fouten is not None else []
+
+    def veilig(functie, record):
+        try:
+            return functie(record)
+        except NietTeBoeken as e:
+            log.error("Niet geboekt: %s", e)
+            fouten.append(str(e))
+            return None
 
     for betaling in mollie.betalingen(grens):
         regel = van_betaling(betaling)
@@ -113,12 +126,17 @@ def verzamel(mollie: MollieClient, grens: str) -> list:
 
     voor = len(regels)
     for chargeback in mollie.chargebacks(grens):
-        regels.extend(van_chargeback(chargeback))
+        regels.extend(veilig(van_chargeback, chargeback) or [])
     aantallen["chargebacks"] = len(regels) - voor
 
     voor = len(regels)
     for refund in mollie.refunds(grens):
-        regel = van_refund(refund)
+        # Zonder settlementAmount (weg per 1 januari 2027) is de betaalmethode nodig;
+        # stuurt Mollie de betaling niet mee, dan halen we haar op.
+        if (not refund.get("settlementAmount") and not (refund.get("_embedded") or {}).get("payment")
+                and refund.get("paymentId")):
+            refund = dict(refund, _embedded={"payment": mollie.betaling(refund["paymentId"])})
+        regel = veilig(van_refund, refund)
         if regel:
             regels.append(regel)
     aantallen["refunds"] = len(regels) - voor
@@ -208,13 +226,14 @@ def draai(config: Config, dry_run: bool = False) -> dict:
     state = State(config.state_pad)
     _controleer_intentie(state)
 
-    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen))
+    fouten: list = []
+    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen), fouten)
     nieuw = [r for r in regels if not state.gezien(r["sleutel"])]
 
     if not nieuw:
         log.info("Niets nieuws.")
         state.sluit()
-        return {"regels": 0, "afschrift_id": None}
+        return {"regels": 0, "afschrift_id": None, "niet_te_boeken": len(fouten)}
 
     if dry_run:
         log.info("DRY RUN, er wordt niets geschreven. %d regels:", len(nieuw))
@@ -223,12 +242,12 @@ def draai(config: Config, dry_run: bool = False) -> dict:
         if len(nieuw) > 40:
             log.info("  ... en nog %d", len(nieuw) - 40)
         state.sluit()
-        return {"regels": len(nieuw), "afschrift_id": None, "dry_run": True}
+        return {"regels": len(nieuw), "afschrift_id": None, "dry_run": True, "niet_te_boeken": len(fouten)}
 
     afschrift_id = _schrijf(moneybird, config, state, nieuw, "mollie")
     state.sluit()
     log.info("Afschrift %s aangemaakt met %d regels", afschrift_id, len(nieuw))
-    return {"regels": len(nieuw), "afschrift_id": afschrift_id}
+    return {"regels": len(nieuw), "afschrift_id": afschrift_id, "niet_te_boeken": len(fouten)}
 
 
 def aansluiten(
@@ -261,7 +280,8 @@ def aansluiten(
             "dat de rekening leeg is, draai dan met --forceer-leeg."
         )
 
-    regels = verzamel(mollie, _grens(dagen))
+    fouten: list = []
+    regels = verzamel(mollie, _grens(dagen), fouten)
     geboekt, ontbreekt = splits(regels, bestaand)
     log.info("Al geboekt: %d. Nog te boeken: %d.", len(geboekt), len(ontbreekt))
 
@@ -271,6 +291,7 @@ def aansluiten(
         "al_geboekt": len(geboekt),
         "ontbreekt": len(ontbreekt),
         "afschrift_id": None,
+        "niet_te_boeken": len(fouten),
     }
 
     if dry_run:

@@ -167,6 +167,10 @@ def _voer_uit(args, config: Config) -> int:
         )
     else:
         print(f"{resultaat['regels']} regels{staart}")
+    if resultaat.get("niet_te_boeken"):
+        # De rest is geboekt; de exitcode zet de hartslag op rood (zie het log voor de kenmerken).
+        print(f"{resultaat['niet_te_boeken']} niet te boeken, zie het log", file=sys.stderr)
+        return 1
     return 0
 
 

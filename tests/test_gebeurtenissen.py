@@ -1,4 +1,7 @@
+import pytest
+
 from mollie_moneybird_sync.gebeurtenissen import (
+    NietTeBoeken,
     van_afrekening,
     van_betaling,
     van_chargeback,
@@ -153,20 +156,23 @@ def test_paypal_refund_via_mollie_wordt_niet_geboekt():
     assert van_refund(dict(paypal, settlementAmount={"value": "0.00", "currency": "EUR"})) is None
 
 
-def test_refund_zonder_settlementamount_en_zonder_betaling_wordt_niet_geboekt():
-    """Zonder het veld en zonder de meegestuurde betaling is een PayPal-refund niet te herkennen."""
+def test_refund_zonder_settlementamount_en_zonder_betaling_is_niet_te_boeken():
+    """Zonder het veld en zonder de betaling is een PayPal-refund niet te herkennen: zichtbaar falen."""
     zonder = {k: v for k, v in REFUND.items() if k != "_embedded"}
-    assert van_refund(zonder) is None
+    with pytest.raises(NietTeBoeken):
+        van_refund(zonder)
     # met settlementAmount blijft het oude gedrag: dat bedrag is wat er van het saldo afging
     assert van_refund(dict(zonder, settlementAmount={"value": "-5.00", "currency": "EUR"}))["amount"] == "-5.00"
 
 
-def test_vreemde_valuta_zonder_settlementamount_wordt_niet_geboekt():
-    """Zonder settlementAmount staat het eurobedrag alleen nog in de afrekening."""
+def test_vreemde_valuta_zonder_settlementamount_is_niet_te_boeken():
+    """Zonder settlementAmount staat het eurobedrag alleen nog in de afrekening: zichtbaar falen."""
     usd = {"value": "43.38", "currency": "USD"}
     cb = {k: v for k, v in CHARGEBACK.items() if k != "settlementAmount"}
-    assert van_chargeback(dict(cb, amount=usd)) == []
-    assert van_refund(dict(REFUND, amount=usd)) is None
+    with pytest.raises(NietTeBoeken):
+        van_chargeback(dict(cb, amount=usd))
+    with pytest.raises(NietTeBoeken):
+        van_refund(dict(REFUND, amount=usd))
 
 
 def test_refund_van_nul_wordt_niet_geboekt():
