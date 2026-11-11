@@ -22,7 +22,30 @@ Mollie-factuur verwijzen.
 Elke regel krijgt een eigen sleutel, zodat een tweede run hem overslaat.
 """
 
+import logging
+
 from .tijd import lokale_datum
+
+log = logging.getLogger(__name__)
+VALUTA = "EUR"  # de valuta van het Mollie-saldo en van de administratie
+
+
+def _afrekenbedrag(record: dict) -> str | None:
+    """Wat er van het saldo afgaat: settlementAmount als dat er is, anders amount in euro's.
+
+    Mollie haalt settlementAmount bij chargebacks en refunds op 1 januari 2027 weg
+    (docs.mollie.com/reference/get-chargeback). Daarna staat bij een andere valuta het
+    eurobedrag alleen nog in de afrekening; zo'n regel boeken we niet en melden we.
+    """
+    afgerekend = record.get("settlementAmount")
+    if afgerekend:
+        return afgerekend["value"]
+    bedrag = record["amount"]
+    if (bedrag.get("currency") or VALUTA) != VALUTA:
+        log.error("%s in %s zonder settlementAmount: niet geboekt, het eurobedrag staat alleen in de afrekening",
+                  record.get("id"), bedrag.get("currency"))
+        return None
+    return bedrag["value"]
 
 
 def _samen(*delen) -> str:
@@ -89,8 +112,10 @@ def van_chargeback(chargeback: dict) -> list:
     # settlementAmount is negatief, amount positief. Mollie haalt settlementAmount op
     # 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); daarna komt alleen
     # amount. De terugboeking is altijd een afschrijving, de terugdraaiing altijd een bijschrijving.
-    bedrag = (chargeback.get("settlementAmount") or chargeback["amount"])["value"]
-    positief = float(bedrag) > 0
+    bedrag = _afrekenbedrag(chargeback)
+    if bedrag is None:
+        return []
+    positief = Decimal(str(bedrag)) > 0
     tr = chargeback.get("paymentId", "")
     regels = [{
         "sleutel": chargeback["id"],
@@ -120,10 +145,23 @@ def van_refund(refund: dict) -> dict | None:
     """
     if refund.get("status") != "refunded":
         return None
+    # Een PayPal-refund raakt het Mollie-saldo niet (settlementAmount is nul) en de
+    # PayPal-import boekt hem al; net als van_betaling slaan we PayPal hier over.
+    methode = ((refund.get("_embedded") or {}).get("payment") or {}).get("method")
+    if methode == "paypal":
+        return None
+    if not refund.get("settlementAmount") and methode is None:
+        log.error("%s zonder settlementAmount en zonder betaling: niet te zien of het PayPal is, niet geboekt",
+                  refund.get("id"))
+        return None
     # settlementAmount is wat er van de balans afgaat; amount is wat de klant
     # krijgt. Bij euro's gelijk, bij vreemde valuta niet.
-    bedrag = (refund.get("settlementAmount") or refund["amount"])["value"]
-    getal = float(bedrag)
+    bedrag = _afrekenbedrag(refund)
+    if bedrag is None:
+        return None
+    getal = Decimal(str(bedrag))
+    if getal == 0:
+        return None
     return {
         "sleutel": refund["id"],
         "tijd": refund["createdAt"],

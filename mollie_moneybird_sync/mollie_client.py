@@ -89,7 +89,9 @@ class MollieClient:
         return self._lijst("/chargebacks?limit=250", "chargebacks", grens)
 
     def refunds(self, grens: str):
-        return self._lijst("/refunds?limit=250", "refunds", grens)
+        """Met de betaling erbij: zonder settlementAmount (weg per 1 januari 2027) is een
+        PayPal-refund alleen aan de betaalmethode te herkennen (docs.mollie.com/reference/list-all-refunds)."""
+        return self._lijst("/refunds?limit=250&embed=payment", "refunds", grens)
 
     def betalingen_van_afrekening(self, afrekening_id: str):
         """De betalingen die in één afrekening zijn meegenomen."""

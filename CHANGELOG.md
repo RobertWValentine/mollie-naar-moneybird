@@ -7,6 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), [Semantic Vers
 
 ### Fixed
 - Een terugboeking blijft een afschrijving als Mollie geen `settlementAmount` meer meestuurt. Mollie haalt dat veld op 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); het overblijvende `amount` is positief en werd tot nu toe ongewijzigd geboekt, zodat een terugboeking als bijschrijving in Moneybird zou komen. De terugdraaiing blijft een bijschrijving. Test erbij.
+- Een refund van een PayPal-betaling die via Mollie loopt wordt niet meer op de Mollie-rekening geboekt: het geld raakt het Mollie-saldo niet en de PayPal-import boekt hem al. Tot nu toe gaf zo'n refund een regel van 0,00; zonder `settlementAmount` (weg per 1 januari 2027) zou het een echte afschrijving worden, dus dubbel. De refundlijst vraagt daarvoor de betaling mee (`embed=payment`). Een refund zonder `settlementAmount` en zonder meegestuurde betaling, en een terugboeking of refund in een andere valuta dan euro zonder `settlementAmount`, worden niet geboekt maar gemeld in het log. Een refund van 0,00 wordt niet meer geboekt. Vijf tests erbij.
 
 ### Changed
 - CI draait nu op Python 3.11 en 3.15. Alle tests slagen op 3.15.2 zonder aanpassing aan de code.

@@ -54,6 +54,7 @@ REFUND = {
     "description": "Terugbetaling bestelling 10000",
     "createdAt": "2026-08-06T10:00:00+00:00",
     "paymentId": "tr_ietsAnders",
+    "_embedded": {"payment": {"id": "tr_ietsAnders", "method": "ideal"}},
 }
 
 AFREKENING = {
@@ -140,6 +141,36 @@ def test_chargeback_zonder_settlementamount_blijft_een_afschrijving():
     regels = van_chargeback(dict(zonder, reversedAt="2026-08-20T09:00:00+00:00"))
     assert regels[0]["amount"] == "-2.50"
     assert regels[1]["amount"] == "2.50"
+
+
+def test_paypal_refund_via_mollie_wordt_niet_geboekt():
+    """Het geld ging nooit over het Mollie-saldo; de PayPal-import boekt de refund al.
+
+    Mollie zet settlementAmount bij een PayPal-refund op nul en haalt het veld op 1 januari 2027 weg.
+    """
+    paypal = dict(REFUND, _embedded={"payment": {"id": "tr_ietsAnders", "method": "paypal"}})
+    assert van_refund(paypal) is None
+    assert van_refund(dict(paypal, settlementAmount={"value": "0.00", "currency": "EUR"})) is None
+
+
+def test_refund_zonder_settlementamount_en_zonder_betaling_wordt_niet_geboekt():
+    """Zonder het veld en zonder de meegestuurde betaling is een PayPal-refund niet te herkennen."""
+    zonder = {k: v for k, v in REFUND.items() if k != "_embedded"}
+    assert van_refund(zonder) is None
+    # met settlementAmount blijft het oude gedrag: dat bedrag is wat er van het saldo afging
+    assert van_refund(dict(zonder, settlementAmount={"value": "-5.00", "currency": "EUR"}))["amount"] == "-5.00"
+
+
+def test_vreemde_valuta_zonder_settlementamount_wordt_niet_geboekt():
+    """Zonder settlementAmount staat het eurobedrag alleen nog in de afrekening."""
+    usd = {"value": "43.38", "currency": "USD"}
+    cb = {k: v for k, v in CHARGEBACK.items() if k != "settlementAmount"}
+    assert van_chargeback(dict(cb, amount=usd)) == []
+    assert van_refund(dict(REFUND, amount=usd)) is None
+
+
+def test_refund_van_nul_wordt_niet_geboekt():
+    assert van_refund(dict(REFUND, settlementAmount={"value": "0.00", "currency": "EUR"})) is None
 
 
 def test_refund_is_negatief():

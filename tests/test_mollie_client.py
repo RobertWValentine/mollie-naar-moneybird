@@ -51,3 +51,15 @@ def test_balansmutaties_falen_ook_bij_afkapping(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="Paginalimiet"):
         list(MollieClient("x").balansmutaties("bal_x", limiet_paginas=2))
+
+
+def test_refunds_vraagt_de_betaling_mee(monkeypatch):
+    """Zonder settlementAmount (weg per 1 januari 2027) herkent van_refund een PayPal-refund aan de betaling."""
+    paden = []
+
+    def nep(url, *a, **k):
+        paden.append(url)
+        return {"_embedded": {"refunds": []}}
+    monkeypatch.setattr(mollie_client, "verzoek", nep)
+    list(MollieClient("x").refunds(""))
+    assert "embed=payment" in paden[0]
