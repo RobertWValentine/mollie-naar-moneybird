@@ -16,6 +16,7 @@ from .gebeurtenissen import (
     van_paypal_transactie,
     van_refund,
 )
+from .http import HttpFout
 from .mollie_client import MollieClient
 from .moneybird_client import MoneybirdClient
 from .paypal_client import PaypalClient, eindsaldo
@@ -132,10 +133,18 @@ def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None) -> li
     voor = len(regels)
     for refund in mollie.refunds(grens):
         # Zonder settlementAmount (weg per 1 januari 2027) is de betaalmethode nodig;
-        # stuurt Mollie de betaling niet mee, dan halen we haar op.
-        if (not refund.get("settlementAmount") and not (refund.get("_embedded") or {}).get("payment")
-                and refund.get("paymentId")):
-            refund = dict(refund, _embedded={"payment": mollie.betaling(refund["paymentId"])})
+        # stuurt Mollie de betaling niet mee, dan halen we haar op. Alleen bij een
+        # afgeronde refund, want een andere boekt van_refund toch niet.
+        if (refund.get("status") == "refunded" and not refund.get("settlementAmount")
+                and not (refund.get("_embedded") or {}).get("payment") and refund.get("paymentId")):
+            try:
+                betaling = mollie.betaling(refund["paymentId"])
+            except HttpFout as e:
+                melding = f"{refund.get('id')}: betaling {refund['paymentId']} niet op te halen (HTTP {e.status})"
+                log.error("Niet geboekt: %s", melding)
+                fouten.append(melding)
+                continue
+            refund = dict(refund, _embedded={"payment": betaling})
         regel = veilig(van_refund, refund)
         if regel:
             regels.append(regel)

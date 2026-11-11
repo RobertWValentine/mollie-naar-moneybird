@@ -269,7 +269,8 @@ Slaapt de machine, dan slaat een ronde over en haalt de volgende alles in: het s
 | `Mollie weigert het verzoek` of `Moneybird weigert het verzoek` | het token klopt niet, hoort bij een andere administratie of mist rechten. Maak het opnieuw aan volgens stap 2 of 3 |
 | `Tijdzonedata voor Europe/Amsterdam ontbreekt` | installeer `tzdata`, zie stap 1 |
 | `Rekening ... bevat geen enkele mutatie` | verkeerd rekening-ID of token van een andere administratie; bij een echt lege rekening `--forceer-leeg` |
-| exitcode 1 | de run is gestopt, er is niets half geboekt |
+| exitcode 1 zonder "niet te boeken" | de run is gestopt, er is niets half geboekt |
+| exitcode 1 met `N niet te boeken, zie het log` | de rest is wel geboekt. In het log staat per record een regel `Niet geboekt: <kenmerk> ...` (een andere valuta dan euro zonder `settlementAmount`, een refund zonder betaalmethode of een betaling die niet op te halen was). Boek dat record met de hand op de Mollie-rekening, met het kenmerk in de omschrijving en het eurobedrag uit de afrekening. De run blijft exitcode 1 geven zolang het record in het venster valt (`MAX_LOOKBACK_DAYS`, standaard 14 dagen), ook na die handmatige boeking |
 | `Er draait al een run` | een andere run is bezig, exitcode 0, de volgende ronde gaat gewoon door |
 | `Een vorige run is afgebroken tijdens het schrijven` | zoek de genoemde referentie op in Moneybird. Staat het afschrift er: laat het staan en draai `--aansluiten`. Staat het er niet: draai opnieuw. Daarna `--wis-intentie` |
 | `Moneybird nam X van de Y regels aan` | Moneybird verwierp regels. Er is niets als verwerkt weggeschreven, dus na het wegnemen van de oorzaak draait hij gewoon opnieuw |
