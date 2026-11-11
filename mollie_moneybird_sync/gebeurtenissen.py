@@ -41,9 +41,10 @@ def _afrekenbedrag(record: dict) -> str:
     """
     afgerekend = record.get("settlementAmount")
     if afgerekend:
+        # Al in de valuta van het saldo (wat er van de balans afgaat), dus geen valutatoets.
         return afgerekend["value"]
     bedrag = record["amount"]
-    if (bedrag.get("currency") or VALUTA) != VALUTA:
+    if bedrag.get("currency") != VALUTA:
         raise NietTeBoeken(f"{record.get('id')} in {bedrag.get('currency')} zonder settlementAmount: "
                            "het eurobedrag staat alleen in de afrekening")
     return bedrag["value"]
@@ -114,6 +115,8 @@ def van_chargeback(chargeback: dict) -> list:
     # 1 januari 2027 weg (docs.mollie.com/reference/get-chargeback); daarna komt alleen
     # amount. De terugboeking is altijd een afschrijving, de terugdraaiing altijd een bijschrijving.
     bedrag = _afrekenbedrag(chargeback)
+    if Decimal(str(bedrag)) == 0:
+        return []  # raakt het saldo niet, net als een refund van 0,00
     positief = Decimal(str(bedrag)) > 0
     tr = chargeback.get("paymentId", "")
     regels = [{

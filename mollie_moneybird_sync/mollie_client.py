@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Leest de Mollie API. Schrijft nooit."""
 import logging
+import urllib.parse
 
 from .http import verzoek
 
@@ -90,7 +91,7 @@ class MollieClient:
 
     def betaling(self, betaling_id: str) -> dict:
         """Eén betaling, voor een refund waarbij de betaling niet is meegestuurd."""
-        return self._get(f"/payments/{betaling_id}")
+        return self._get(f"/payments/{urllib.parse.quote(betaling_id, safe='')}")
 
     def refunds(self, grens: str):
         """Met de betaling erbij: zonder settlementAmount (weg per 1 januari 2027) is een

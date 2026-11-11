@@ -8,7 +8,7 @@ Dit programma schrijft in iemands boekhouding. Een fout daar kost de gebruiker u
 
 1. **Vraag nooit om tokens in de chat.** Laat de gebruiker ze zelf in `.env` zetten. Lees `.env` niet voor, toon er geen waarden uit en zet er nooit iets van in een commit, logbestand of issue.
 2. **Nooit schrijven zonder droogloop.** Draai elke ronde eerst met `--dry-run`, laat de uitvoer zien, leg uit wat er zou gebeuren en wacht op een uitdrukkelijk ja van de gebruiker.
-3. **Deze vlaggen alleen na expliciete toestemming:** `--forceer-leeg`, `--verwijder-afschrift` en `--wis-intentie`. Leg eerst uit wat ze doen en waarom je ze nodig denkt te hebben.
+3. **Deze vlaggen alleen na expliciete toestemming:** `--forceer-leeg`, `--verwijder-afschrift`, `--wis-intentie` en `--handmatig-geboekt`. Leg eerst uit wat ze doen en waarom je ze nodig denkt te hebben.
 4. **Nooit op de gewone bankrekening.** `MONEYBIRD_FINANCIAL_ACCOUNT_ID` moet een aparte rekening voor Mollie zijn. Twijfel je, vraag het.
 5. **Eén importeur tegelijk.** Vraag of er al een andere dienst Mollie-transacties in Moneybird zet. Zo ja: de gebruiker trekt die eerst in. Anders ontstaan dubbele regels.
 6. **Stop bij iets onverwachts.** Een foutmelding, honderden ontbrekende regels, een lege rekening of een verschil bij `--controleer`: stop, laat het zien en vraag hoe verder. Ga niet zelf repareren in de boekhouding.

@@ -13,7 +13,7 @@ niet als losse chargeback.
 """
 import logging
 
-from .gebeurtenissen import van_afrekening, van_betaling, van_chargeback
+from .gebeurtenissen import NietTeBoeken, van_afrekening, van_betaling, van_chargeback
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +38,18 @@ def toets_afrekening(mollie, afrekening: dict) -> dict:
         float(r["amount"]) for r in van_afrekening(afrekening)
         if not r["message"].startswith("Mollie Settlement")
     )
-    terug = sum(
-        float(r["amount"])
-        for cb in mollie.chargebacks_van_afrekening(stl)
-        for r in van_chargeback(cb)
-    )
+    toetsbaar = True
+    try:
+        terug = sum(
+            float(r["amount"])
+            for cb in mollie.chargebacks_van_afrekening(stl)
+            for r in van_chargeback(cb)
+        )
+    except NietTeBoeken as e:
+        # Eén terugboeking zonder eurobedrag maakt deze afrekening ontoetsbaar. Melden als
+        # afwijkend en doorgaan met de volgende, niet de hele controle laten stoppen.
+        log.error("Afrekening %s niet te toetsen: %s", stl, e)
+        terug, toetsbaar = 0.0, False
 
     verschil = round(bruto + correcties + terug - uitbetaling, 2)
     return {
@@ -53,7 +60,8 @@ def toets_afrekening(mollie, afrekening: dict) -> dict:
         "terugboekingen": round(terug, 2),
         "uitbetaling": uitbetaling,
         "verschil": verschil,
-        "sluit": abs(verschil) <= MARGE,
+        "toetsbaar": toetsbaar,
+        "sluit": toetsbaar and abs(verschil) <= MARGE,
     }
 
 
@@ -69,6 +77,7 @@ def controleer(mollie, aantal: int = 4) -> list:
             "- uitbetaling %.2f = %.2f  %s",
             uitkomst["afrekening"], uitkomst["bruto"], uitkomst["correcties"],
             uitkomst["terugboekingen"], uitkomst["uitbetaling"],
-            uitkomst["verschil"], "OK" if uitkomst["sluit"] else "WIJKT AF",
+            uitkomst["verschil"],
+            "OK" if uitkomst["sluit"] else ("WIJKT AF" if uitkomst["toetsbaar"] else "NIET TE TOETSEN"),
         )
     return uitkomsten

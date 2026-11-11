@@ -63,3 +63,21 @@ def test_refunds_vraagt_de_betaling_mee(monkeypatch):
     monkeypatch.setattr(mollie_client, "verzoek", nep)
     list(MollieClient("x").refunds(""))
     assert "embed=payment" in paden[0]
+
+
+def test_betaling_haalt_een_betaling_op(monkeypatch):
+    paden = []
+
+    def nep(url, *a, **k):
+        paden.append(url)
+        return {"id": "tr_verzonnen", "method": "ideal"}
+    monkeypatch.setattr(mollie_client, "verzoek", nep)
+    assert MollieClient("x").betaling("tr_verzonnen")["method"] == "ideal"
+    assert paden[0].endswith("/payments/tr_verzonnen")
+
+
+def test_betaling_codeert_het_kenmerk_in_het_pad(monkeypatch):
+    paden = []
+    monkeypatch.setattr(mollie_client, "verzoek", lambda url, *a, **k: paden.append(url) or {})
+    MollieClient("x").betaling("tr_x/../refunds?limit=1")
+    assert paden[0].endswith("/payments/tr_x%2F..%2Frefunds%3Flimit%3D1")

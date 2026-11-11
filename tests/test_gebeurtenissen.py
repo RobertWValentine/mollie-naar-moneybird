@@ -175,6 +175,19 @@ def test_vreemde_valuta_zonder_settlementamount_is_niet_te_boeken():
         van_refund(dict(REFUND, amount=usd))
 
 
+def test_bedrag_zonder_valuta_is_niet_te_boeken_maar_afrekenbedrag_altijd_wel():
+    """De valutatoets op amount faalt dicht: geen valuta is geen euro. settlementAmount staat al
+    in de valuta van het saldo (wat er van de balans afgaat) en wordt dus zonder toets geboekt."""
+    cb = {k: v for k, v in CHARGEBACK.items() if k != "settlementAmount"}
+    with pytest.raises(NietTeBoeken):
+        van_chargeback(dict(cb, amount={"value": "2.50"}))
+    assert van_refund(dict(REFUND, settlementAmount={"value": "-5.00", "currency": "GBP"}))["amount"] == "-5.00"
+
+
+def test_terugboeking_van_nul_wordt_niet_geboekt():
+    assert van_chargeback(dict(CHARGEBACK, settlementAmount={"value": "0.00", "currency": "EUR"})) == []
+
+
 def test_refund_van_nul_wordt_niet_geboekt():
     assert van_refund(dict(REFUND, settlementAmount={"value": "0.00", "currency": "EUR"})) is None
 

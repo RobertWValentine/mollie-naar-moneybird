@@ -6,7 +6,7 @@ import hashlib
 import logging
 import os
 
-from .aansluiten import splits
+from .aansluiten import kenmerken_van, splits
 from .config import Config
 from .gebeurtenissen import (
     NietTeBoeken,
@@ -96,7 +96,50 @@ class Lock:
             pass
 
 
-def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None) -> list:
+BETALING_WEG = (404, 410)  # de betaling bestaat niet (meer): blijvend, dus per refund melden
+
+
+def _sleutels_van(record: dict) -> list:
+    """De sleutels die een terugboeking of refund in de state krijgt, zonder hem om te zetten."""
+    sleutels = [record.get("id", "")]
+    if record.get("reversedAt"):
+        sleutels.append(f"{record.get('id', '')}:teruggedraaid")
+    return sleutels
+
+
+def _meld(fouten: list, gezien) -> int:
+    """Logt en telt de niet te boeken records die nog niet geboekt zijn.
+
+    Een record dat al geboekt is (in de state of al in Moneybird) telt niet mee. Na
+    1 januari 2027 mist ook een al geboekte terugboeking haar settlementAmount; zonder
+    deze filter werd de ronde dan onterecht rood en zou wie hem met de hand boekt hem
+    dubbel boeken.
+    """
+    open_ = [f for f in fouten if not all(gezien(s) for s in f["sleutels"])]
+    for f in open_:
+        nog = ", ".join(s for s in f["sleutels"] if not gezien(s))
+        log.error("Niet geboekt: %s (na een handmatige boeking vastleggen: %s)", f["melding"], nog)
+    return len(open_)
+
+
+def open_niet_te_boeken(config: Config, dagen: int | None = None) -> set:
+    """De sleutels die nu als niet te boeken openstaan: alleen die mag --handmatig-geboekt vastleggen.
+
+    Een geldig maar verkeerd geplakt kenmerk van een gewone, nog niet geboekte refund zou
+    die refund anders voorgoed uit de import houden. `dagen` volgt het venster van de ronde
+    die het record meldde (--aansluiten kijkt standaard 30 dagen terug).
+    """
+    mollie = MollieClient(config.mollie_token)
+    state = State(config.state_pad)
+    try:
+        fouten: list = []
+        verzamel(mollie, _grens(dagen or config.max_terugkijk_dagen), fouten, state.gezien)
+        return {s for f in fouten for s in f["sleutels"] if not state.gezien(s)}
+    finally:
+        state.sluit()
+
+
+def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None, gezien=None) -> list:
     """Haalt alle boekbare gebeurtenissen op vanaf de grensdatum.
 
     Vier bronnen, elk met zijn eigen moment van boeken. Betalingen worden
@@ -104,19 +147,21 @@ def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None) -> li
     doorgaans een dag uit elkaar, dus het venster moet ruimer zijn dan de
     periode die je wilt boeken.
 
-    Een record dat niet veilig te boeken is (NietTeBoeken) komt in `fouten` en de rest
-    gaat gewoon door; de aanroeper laat de ronde daarna met exitcode 1 eindigen.
+    Een record dat niet veilig te boeken is (NietTeBoeken) komt met zijn sleutels in
+    `fouten` en de rest gaat gewoon door; de aanroeper filtert met `_meld` wat al geboekt
+    is en laat de ronde daarna met exitcode 1 eindigen. `gezien` slaat het ophalen van
+    de betaling over voor een refund die al geboekt is.
     """
     regels: list = []
     aantallen: dict = {}
     fouten = fouten if fouten is not None else []
+    gezien = gezien or (lambda sleutel: False)
 
     def veilig(functie, record):
         try:
             return functie(record)
         except NietTeBoeken as e:
-            log.error("Niet geboekt: %s", e)
-            fouten.append(str(e))
+            fouten.append({"sleutels": _sleutels_van(record), "melding": str(e)})
             return None
 
     for betaling in mollie.betalingen(grens):
@@ -134,15 +179,20 @@ def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None) -> li
     for refund in mollie.refunds(grens):
         # Zonder settlementAmount (weg per 1 januari 2027) is de betaalmethode nodig;
         # stuurt Mollie de betaling niet mee, dan halen we haar op. Alleen bij een
-        # afgeronde refund, want een andere boekt van_refund toch niet.
+        # afgeronde refund die nog niet geboekt is.
         if (refund.get("status") == "refunded" and not refund.get("settlementAmount")
-                and not (refund.get("_embedded") or {}).get("payment") and refund.get("paymentId")):
+                and not (refund.get("_embedded") or {}).get("payment") and refund.get("paymentId")
+                and not gezien(refund.get("id", ""))):
             try:
                 betaling = mollie.betaling(refund["paymentId"])
             except HttpFout as e:
-                melding = f"{refund.get('id')}: betaling {refund['paymentId']} niet op te halen (HTTP {e.status})"
-                log.error("Niet geboekt: %s", melding)
-                fouten.append(melding)
+                # Een tijdelijke fout (429, 5xx) of een tokenprobleem zegt niets over deze
+                # refund: de ronde stopt vóór het schrijven en de volgende probeert opnieuw.
+                if e.status not in BETALING_WEG:
+                    raise
+                fouten.append({"sleutels": [refund.get("id", "")],
+                               "melding": f"{refund.get('id')}: betaling {refund['paymentId']} "
+                                          f"bestaat niet (HTTP {e.status})"})
                 continue
             refund = dict(refund, _embedded={"payment": betaling})
         regel = veilig(van_refund, refund)
@@ -236,13 +286,14 @@ def draai(config: Config, dry_run: bool = False) -> dict:
     _controleer_intentie(state)
 
     fouten: list = []
-    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen), fouten)
+    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen), fouten, state.gezien)
+    niet_te_boeken = _meld(fouten, state.gezien)
     nieuw = [r for r in regels if not state.gezien(r["sleutel"])]
 
     if not nieuw:
         log.info("Niets nieuws.")
         state.sluit()
-        return {"regels": 0, "afschrift_id": None, "niet_te_boeken": len(fouten)}
+        return {"regels": 0, "afschrift_id": None, "niet_te_boeken": niet_te_boeken}
 
     if dry_run:
         log.info("DRY RUN, er wordt niets geschreven. %d regels:", len(nieuw))
@@ -251,12 +302,12 @@ def draai(config: Config, dry_run: bool = False) -> dict:
         if len(nieuw) > 40:
             log.info("  ... en nog %d", len(nieuw) - 40)
         state.sluit()
-        return {"regels": len(nieuw), "afschrift_id": None, "dry_run": True, "niet_te_boeken": len(fouten)}
+        return {"regels": len(nieuw), "afschrift_id": None, "dry_run": True, "niet_te_boeken": niet_te_boeken}
 
     afschrift_id = _schrijf(moneybird, config, state, nieuw, "mollie")
     state.sluit()
     log.info("Afschrift %s aangemaakt met %d regels", afschrift_id, len(nieuw))
-    return {"regels": len(nieuw), "afschrift_id": afschrift_id, "niet_te_boeken": len(fouten)}
+    return {"regels": len(nieuw), "afschrift_id": afschrift_id, "niet_te_boeken": niet_te_boeken}
 
 
 def aansluiten(
@@ -289,8 +340,19 @@ def aansluiten(
             "dat de rekening leeg is, draai dan met --forceer-leeg."
         )
 
+    # Al geboekt is wat in de state staat, of wat met zijn kenmerk al in Moneybird staat.
+    # Een terugboeking of refund is een afschrijving, een terugdraaiing een bijschrijving
+    # met hetzelfde kenmerk: het teken houdt ze uit elkaar.
+    in_moneybird = {(k, float(m["amount"]) > 0) for m in bestaand
+                    for k in kenmerken_van(m.get("message", ""))}
+
+    def gezien(sleutel: str) -> bool:
+        kenmerk, _, soort = sleutel.partition(":")
+        return state.gezien(sleutel) or (kenmerk, soort == "teruggedraaid") in in_moneybird
+
     fouten: list = []
-    regels = verzamel(mollie, _grens(dagen), fouten)
+    regels = verzamel(mollie, _grens(dagen), fouten, gezien)
+    niet_te_boeken = _meld(fouten, gezien)
     geboekt, ontbreekt = splits(regels, bestaand)
     log.info("Al geboekt: %d. Nog te boeken: %d.", len(geboekt), len(ontbreekt))
 
@@ -300,7 +362,7 @@ def aansluiten(
         "al_geboekt": len(geboekt),
         "ontbreekt": len(ontbreekt),
         "afschrift_id": None,
-        "niet_te_boeken": len(fouten),
+        "niet_te_boeken": niet_te_boeken,
     }
 
     if dry_run:
@@ -314,6 +376,12 @@ def aansluiten(
 
     if geboekt:
         state.markeer([r["sleutel"] for r in geboekt], "bestond-al", geboekt[-1]["date"])
+
+    # Een niet te boeken record dat al in Moneybird staat, ook in de state vastleggen. Anders
+    # meldt de volgende gewone ronde (die alleen de state kent) hem weer als niet geboekt.
+    al_in_moneybird = [s for f in fouten for s in f["sleutels"] if not state.gezien(s) and gezien(s)]
+    if al_in_moneybird:
+        state.markeer(al_in_moneybird, "bestond-al", dt.date.today().isoformat())
 
     if ontbreekt:
         resultaat["afschrift_id"] = _schrijf(
