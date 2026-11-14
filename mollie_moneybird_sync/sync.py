@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import logging
 import os
+import time
 
 from .aansluiten import kenmerken_van, splits
 from .config import Config
@@ -28,7 +29,12 @@ log = logging.getLogger(__name__)
 
 
 class Vergrendeld(RuntimeError):
-    pass
+    """Een andere run houdt de lock vast. `minuten` is de leeftijd van de
+    lockfile, of None als die niet te bepalen is."""
+
+    def __init__(self, melding: str, minuten: float | None = None):
+        super().__init__(melding)
+        self.minuten = minuten
 
 
 class Lock:
@@ -61,14 +67,22 @@ class Lock:
             return True
         return True
 
+    def _leeftijd_minuten(self) -> float | None:
+        try:
+            return (time.time() - os.path.getmtime(self.pad)) / 60
+        except OSError:
+            return None
+
     def __enter__(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.pad)), mode=0o700, exist_ok=True)
         for poging in (1, 2):
             try:
                 fd = os.open(self.pad, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
                 if self._draait_nog():
                     raise Vergrendeld(
-                        f"Er draait al een run. Lockfile: {self.pad}"
+                        f"Er draait al een run. Lockfile: {self.pad}",
+                        self._leeftijd_minuten(),
                     ) from None
                 if poging == 1:
                     log.warning("Lockfile van een verdwenen proces opgeruimd")

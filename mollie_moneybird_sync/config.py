@@ -59,7 +59,16 @@ class Config:
         self.state_pad = os.environ.get(
             "STATE_PATH", os.path.expanduser("~/.mollie-moneybird-sync/state.db")
         )
-        self.lock_pad = os.environ.get("LOCK_PATH", "/tmp/mollie-moneybird-sync.lock")
+        # De lock staat standaard naast de state, in een map van de gebruiker die
+        # de run draait. In een gedeelde map als /tmp kan een andere gebruiker
+        # het bestand aanmaken en daarmee elke ronde tegenhouden.
+        self.lock_pad = os.environ.get("LOCK_PATH") or os.path.join(
+            os.path.dirname(os.path.abspath(self.state_pad)), "mollie-moneybird-sync.lock"
+        )
+        # Een lock die langer bezet is dan dit aantal minuten is geen gewone
+        # overlap meer maar een vastgelopen run of een vreemd bestand. De run
+        # eindigt dan met exitcode 3, zodat een hartslagmonitor rood wordt.
+        self.lock_alarm_minuten = int(os.environ.get("LOCK_ALERT_MINUTES", "60"))
         # Hoe ver terug we kijken. Let op: dit venster loopt op de datum
         # waarop een betaling is aangemaakt, terwijl we boeken op de datum
         # waarop hij is voldaan. Gemeten zit daar tot vijf dagen tussen, met

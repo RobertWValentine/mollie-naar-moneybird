@@ -17,5 +17,9 @@ Zet Mollie- en PayPal-transacties als bankafschriften in Moneybird. Pure Python,
 - Geen echte klantgegevens, kenmerken of administratie-ID's in code, tests of documentatie. Dit is een openbare repo.
 - Schrijfacties naar Moneybird nooit herhalen bij een time-out of serverfout.
 - CHANGELOG.md bijwerken bij elke wijziging.
+- Elke wijziging die gebruikers raakt krijgt een versie: CHANGELOG-kop met versie en datum, `version` in `pyproject.toml`, tag `vX.Y.Z` en een GitHub Release met de CHANGELOG-tekst.
 
-Installatie voor een gebruiker: volg `AGENTS.md`.
+## Installatie voor een gebruiker
+Installeer je deze repo voor iemand, volg dan de instructies hieronder (uit `AGENTS.md`):
+
+@AGENTS.md

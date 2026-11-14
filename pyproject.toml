@@ -1,9 +1,14 @@
 [project]
-name = "mollie-moneybird-sync"
-version = "0.1.0"
-description = "Zet Mollie-transacties als bankafschriften in Moneybird"
+name = "mollie-naar-moneybird"
+version = "0.2.0"
+description = "Zet Mollie- en PayPal-transacties als bankafschriften in Moneybird"
 requires-python = ">=3.9"
+license = { text = "MIT" }
 dependencies = ["tzdata; platform_system != 'Darwin'"]
+
+[project.urls]
+Repository = "https://github.com/RobertWValentine/mollie-naar-moneybird"
+Changelog = "https://github.com/RobertWValentine/mollie-naar-moneybird/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
