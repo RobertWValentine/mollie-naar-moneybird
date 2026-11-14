@@ -181,6 +181,12 @@ def _voer_uit(args, config: Config) -> int:
             else:
                 resultaat = draai(config, dry_run=args.dry_run)
     except Vergrendeld as e:
+        if e.vreemd:
+            logging.error(
+                "%s Bekijk het bestand en verwijder het als het niet van een eigen run is. "
+                "Exitcode 3, zodat de bewaking dit ziet.", e,
+            )
+            return 3
         if e.minuten is not None and e.minuten >= config.lock_alarm_minuten:
             logging.error(
                 "%s De lock is %d minuten oud. Draait dat proces echt nog? Zo niet, "

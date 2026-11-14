@@ -11,7 +11,9 @@ Belangrijk vóór 1 januari 2027: Mollie haalt dan `settlementAmount` weg bij te
 
 ### Security
 - De lock staat standaard naast de state (`mollie-moneybird-sync.lock` in de map van `STATE_PATH`) in plaats van in `/tmp`. In een gedeelde map kon een andere gebruiker het bestand aanmaken en zo elke ronde tegenhouden. Een ontbrekende map wordt aangemaakt met rechten 700. Wie `LOCK_PATH` zelf zet, houdt die plek.
-- Een lock die langer bezet is dan `LOCK_ALERT_MINUTES` (standaard 60) geeft exitcode 3 en een foutregel met de leeftijd van de lock. Tot nu toe eindigde zo'n run altijd met exitcode 0, zodat een vastgelopen lock de keten kon stilleggen terwijl de hartslagmonitor groen bleef. Een gewone overlap blijft exitcode 0. Tests erbij.
+- Een lock die langer bezet is dan `LOCK_ALERT_MINUTES` (standaard 90) geeft exitcode 3 en een foutregel met de leeftijd van de lock. Tot nu toe eindigde zo'n run altijd met exitcode 0, zodat een vastgelopen lock de keten kon stilleggen terwijl de hartslagmonitor groen bleef. Een gewone overlap blijft exitcode 0. De standaard ligt ruim boven een uurlijkse cron, zodat de grens niet op het interval zelf valt.
+- Een lockfile die geen gewoon bestand is (bijvoorbeeld een symlink), van een andere gebruiker is of een tijd in de toekomst heeft, geeft meteen exitcode 3. Zo'n bestand kan niet van een eigen run zijn; zonder deze toets kon iemand met een bestand met een toekomstige tijd het alarm omzeilen. De leeftijd wordt gelezen zonder een symlink te volgen.
+- `LOCK_ALERT_MINUTES` en `MAX_LOOKBACK_DAYS` die geen geheel getal zijn, geven één leesbare regel en exitcode 2 in plaats van een Python-foutmelding. Leeg betekent de standaardwaarde. Tests erbij.
 - `SECURITY.md`: hoe je een kwetsbaarheid privé meldt.
 
 ### Fixed

@@ -46,6 +46,18 @@ def _verplicht(naam: str, uitleg: str) -> str:
     return waarde
 
 
+def _geheel(naam: str, standaard: int) -> int:
+    """Een geheel getal uit de omgeving. Leeg is de standaardwaarde; iets anders
+    dan een getal is een leesbare fout in plaats van een Python-foutmelding."""
+    waarde = os.environ.get(naam, "").strip()
+    if not waarde:
+        return standaard
+    try:
+        return int(waarde)
+    except ValueError:
+        raise ConfigFout(f"{naam} moet een heel getal zijn, nu '{waarde}'. Pas het aan in .env.") from None
+
+
 class Config:
     def __init__(self) -> None:
         # Tokens en ID's worden pas opgehaald als een opdracht ze gebruikt.
@@ -68,13 +80,15 @@ class Config:
         # Een lock die langer bezet is dan dit aantal minuten is geen gewone
         # overlap meer maar een vastgelopen run of een vreemd bestand. De run
         # eindigt dan met exitcode 3, zodat een hartslagmonitor rood wordt.
-        self.lock_alarm_minuten = int(os.environ.get("LOCK_ALERT_MINUTES", "60"))
+        # Standaard 90: ruim boven een uurlijkse cron, zodat de grens niet op
+        # het interval zelf valt.
+        self.lock_alarm_minuten = _geheel("LOCK_ALERT_MINUTES", 90)
         # Hoe ver terug we kijken. Let op: dit venster loopt op de datum
         # waarop een betaling is aangemaakt, terwijl we boeken op de datum
         # waarop hij is voldaan. Gemeten zit daar tot vijf dagen tussen, met
         # het zwaartepunt op twee tot vier. Veertien dagen geeft dus ruime
         # marge; korter dan een week is vragen om gemiste betalingen.
-        self.max_terugkijk_dagen = int(os.environ.get("MAX_LOOKBACK_DAYS", "14"))
+        self.max_terugkijk_dagen = _geheel("MAX_LOOKBACK_DAYS", 14)
 
     @property
     def mollie_token(self) -> str:

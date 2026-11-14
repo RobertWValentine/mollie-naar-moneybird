@@ -1,5 +1,6 @@
 """De lock: standaard naast de state, en een oude lock is een fout."""
 import os
+import stat
 import time
 
 from mollie_moneybird_sync import cli
@@ -64,7 +65,7 @@ def test_verse_lock_is_gewone_overlap_met_exitcode_0(monkeypatch, tmp_path, capl
 
 def test_oude_lock_geeft_exitcode_3(monkeypatch, tmp_path, caplog):
     _instellingen(monkeypatch, tmp_path)
-    _bezet(tmp_path / "mollie-moneybird-sync.lock", 61)
+    _bezet(tmp_path / "mollie-moneybird-sync.lock", 91)
     monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: (_ for _ in ()).throw(
         AssertionError("de run mocht niet starten")))
     assert cli.main([]) == 3
@@ -77,3 +78,65 @@ def test_alarmgrens_is_instelbaar(monkeypatch, tmp_path):
     _bezet(tmp_path / "mollie-moneybird-sync.lock", 15)
     monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
     assert cli.main([]) == 3
+
+
+def test_alarmgrens_standaard_90_en_leeg_is_standaard(monkeypatch, tmp_path):
+    _instellingen(monkeypatch, tmp_path)
+    assert Config().lock_alarm_minuten == 90
+    monkeypatch.setenv("LOCK_ALERT_MINUTES", "")
+    assert Config().lock_alarm_minuten == 90
+
+
+def test_ongeldige_getallen_geven_een_leesbare_regel(monkeypatch, tmp_path, capsys):
+    _instellingen(monkeypatch, tmp_path)
+    for naam in ("LOCK_ALERT_MINUTES", "MAX_LOOKBACK_DAYS"):
+        monkeypatch.setenv(naam, "abc")
+        assert cli.main(["--dry-run"]) == 2
+        fout = capsys.readouterr().err
+        assert naam in fout
+        assert "Traceback" not in fout
+        monkeypatch.delenv(naam)
+
+
+def test_nieuwe_lockmap_heeft_rechten_700(tmp_path):
+    pad = tmp_path / "nieuw" / "run.lock"
+    with Lock(str(pad)):
+        pass
+    assert stat.S_IMODE((tmp_path / "nieuw").stat().st_mode) == 0o700
+
+
+def test_onbekende_leeftijd_is_gewone_overlap(monkeypatch, tmp_path):
+    _instellingen(monkeypatch, tmp_path)
+    _bezet(tmp_path / "mollie-moneybird-sync.lock", 120)
+    monkeypatch.setattr(Lock, "_leeftijd_minuten", lambda self: None)
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
+    assert cli.main([]) == 0
+
+
+def test_lock_met_tijd_in_de_toekomst_geeft_exitcode_3(monkeypatch, tmp_path, caplog):
+    _instellingen(monkeypatch, tmp_path)
+    _bezet(tmp_path / "mollie-moneybird-sync.lock", -60 * 24)
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
+    assert cli.main([]) == 3
+    assert "toekomst" in caplog.text
+
+
+def test_symlink_als_lock_geeft_exitcode_3(monkeypatch, tmp_path, caplog):
+    _instellingen(monkeypatch, tmp_path)
+    doel = tmp_path / "elders.txt"
+    _bezet(doel, 0)
+    os.symlink(doel, tmp_path / "mollie-moneybird-sync.lock")
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
+    assert cli.main([]) == 3
+    assert "geen gewoon bestand" in caplog.text
+    assert doel.exists()
+
+
+def test_lock_van_een_andere_gebruiker_geeft_exitcode_3(monkeypatch, tmp_path, caplog):
+    _instellingen(monkeypatch, tmp_path)
+    _bezet(tmp_path / "mollie-moneybird-sync.lock", 0)
+    echte_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: echte_uid + 1)
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
+    assert cli.main([]) == 3
+    assert "andere gebruiker" in caplog.text

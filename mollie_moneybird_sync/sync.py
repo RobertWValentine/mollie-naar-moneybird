@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import logging
 import os
+import stat
 import time
 
 from .aansluiten import kenmerken_van, splits
@@ -30,11 +31,13 @@ log = logging.getLogger(__name__)
 
 class Vergrendeld(RuntimeError):
     """Een andere run houdt de lock vast. `minuten` is de leeftijd van de
-    lockfile, of None als die niet te bepalen is."""
+    lockfile, of None als die niet te bepalen is. `vreemd` zegt waarom de
+    lockfile niet te vertrouwen is (leeg als hij wel te vertrouwen is)."""
 
-    def __init__(self, melding: str, minuten: float | None = None):
+    def __init__(self, melding: str, minuten: float | None = None, vreemd: str = ""):
         super().__init__(melding)
         self.minuten = minuten
+        self.vreemd = vreemd
 
 
 class Lock:
@@ -69,9 +72,31 @@ class Lock:
 
     def _leeftijd_minuten(self) -> float | None:
         try:
-            return (time.time() - os.path.getmtime(self.pad)) / 60
+            return (time.time() - os.lstat(self.pad).st_mtime) / 60
         except OSError:
             return None
+
+    def _vreemd(self) -> str:
+        """Waarom deze lockfile niet van een eigen run kan zijn, of leeg.
+
+        Een eigen run maakt een gewoon bestand, van dezelfde gebruiker, met de
+        tijd van nu. Een symlink, een bestand van een andere gebruiker of een
+        tijd in de toekomst komt van iemand anders; zo'n bestand mag de
+        rondes niet ongemerkt tegenhouden.
+        """
+        try:
+            st = os.lstat(self.pad)
+        except FileNotFoundError:
+            return ""
+        except OSError as e:
+            return f"niet te lezen ({e.__class__.__name__})"
+        if not stat.S_ISREG(st.st_mode):
+            return "geen gewoon bestand"
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return "van een andere gebruiker"
+        if st.st_mtime > time.time() + 60:
+            return "met een tijd in de toekomst"
+        return ""
 
     def __enter__(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.pad)), mode=0o700, exist_ok=True)
@@ -79,6 +104,12 @@ class Lock:
             try:
                 fd = os.open(self.pad, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
+                vreemd = self._vreemd()
+                if vreemd:
+                    raise Vergrendeld(
+                        f"Lockfile {self.pad} is niet van een eigen run: {vreemd}.",
+                        None, vreemd,
+                    ) from None
                 if self._draait_nog():
                     raise Vergrendeld(
                         f"Er draait al een run. Lockfile: {self.pad}",
