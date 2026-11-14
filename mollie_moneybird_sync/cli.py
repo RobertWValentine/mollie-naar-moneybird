@@ -183,8 +183,9 @@ def _voer_uit(args, config: Config) -> int:
     except Vergrendeld as e:
         if e.vreemd:
             logging.error(
-                "%s Bekijk het bestand en verwijder het als het niet van een eigen run is. "
-                "Exitcode 3, zodat de bewaking dit ziet.", e,
+                "%s Kijk eerst of het proces met het nummer uit de lockfile nog draait "
+                "(ps -p <nummer>). Verwijder het bestand alleen als dat geen run van dit "
+                "script is. Exitcode 3, zodat de bewaking dit ziet.", e,
             )
             return 3
         if e.minuten is not None and e.minuten >= config.lock_alarm_minuten:

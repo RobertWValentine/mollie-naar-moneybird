@@ -98,6 +98,25 @@ def test_ongeldige_getallen_geven_een_leesbare_regel(monkeypatch, tmp_path, caps
         monkeypatch.delenv(naam)
 
 
+def test_nul_of_negatief_is_geen_geldige_waarde(monkeypatch, tmp_path, capsys):
+    _instellingen(monkeypatch, tmp_path)
+    for naam, waarde in (("MAX_LOOKBACK_DAYS", "0"), ("LOCK_ALERT_MINUTES", "-5")):
+        monkeypatch.setenv(naam, waarde)
+        assert cli.main(["--dry-run"]) == 2
+        assert naam in capsys.readouterr().err
+        monkeypatch.delenv(naam)
+
+
+def test_hardlink_als_lock_geeft_exitcode_3(monkeypatch, tmp_path, caplog):
+    _instellingen(monkeypatch, tmp_path)
+    doel = tmp_path / "elders.txt"
+    _bezet(doel, 0)
+    os.link(doel, tmp_path / "mollie-moneybird-sync.lock")
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: None)
+    assert cli.main([]) == 3
+    assert "geen gewoon bestand" in caplog.text
+
+
 def test_nieuwe_lockmap_heeft_rechten_700(tmp_path):
     pad = tmp_path / "nieuw" / "run.lock"
     with Lock(str(pad)):

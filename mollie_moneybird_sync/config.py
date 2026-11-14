@@ -46,16 +46,23 @@ def _verplicht(naam: str, uitleg: str) -> str:
     return waarde
 
 
-def _geheel(naam: str, standaard: int) -> int:
+def _geheel(naam: str, standaard: int, minimum: int = 1) -> int:
     """Een geheel getal uit de omgeving. Leeg is de standaardwaarde; iets anders
-    dan een getal is een leesbare fout in plaats van een Python-foutmelding."""
+    dan een getal, of een getal onder het minimum, is een leesbare fout in
+    plaats van een Python-foutmelding of een stil verkeerd venster."""
     waarde = os.environ.get(naam, "").strip()
     if not waarde:
         return standaard
     try:
-        return int(waarde)
+        getal = int(waarde)
     except ValueError:
-        raise ConfigFout(f"{naam} moet een heel getal zijn, nu '{waarde}'. Pas het aan in .env.") from None
+        getal = None
+    if getal is None or getal < minimum:
+        raise ConfigFout(
+            f"{naam} moet een heel getal van minstens {minimum} zijn, nu '{waarde}'. "
+            "Pas het aan in .env (zonder aanhalingstekens)."
+        )
+    return getal
 
 
 class Config:

@@ -90,7 +90,7 @@ class Lock:
             return ""
         except OSError as e:
             return f"niet te lezen ({e.__class__.__name__})"
-        if not stat.S_ISREG(st.st_mode):
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
             return "geen gewoon bestand"
         if hasattr(os, "getuid") and st.st_uid != os.getuid():
             return "van een andere gebruiker"
