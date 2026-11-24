@@ -123,17 +123,25 @@ class MoneybirdClient:
         return [m for m in self.mutaties_in_periode(rekening_id, periode)
                 if m.get("state") == "unprocessed"]
 
-    def mutaties_in_periode(self, rekening_id: str, periode: str) -> list:
-        """Alle mutaties van een rekening in een periode, via de synchronisatie-API."""
+    def _ids_in_periode(self, rekening_id: str, periode: str) -> list:
+        """De ID's van de mutaties van een rekening in een periode (de GET van de synchronisatie-API)."""
         pad = self._url(f"financial_mutations/synchronization.json?"
                         f"filter=financial_account_id:{rekening_id},period:{periode}")
-        ids = [x["id"] for x in (verzoek(pad, self.token) or [])]
+        return [x["id"] for x in _lijst(verzoek(pad, self.token))]
+
+    def aantal_mutaties(self, rekening_id: str, periode: str) -> int:
+        """Het aantal mutaties van een rekening in een periode, zonder de mutaties zelf op te halen."""
+        return len(self._ids_in_periode(rekening_id, periode))
+
+    def mutaties_in_periode(self, rekening_id: str, periode: str) -> list:
+        """Alle mutaties van een rekening in een periode, via de synchronisatie-API."""
+        ids = self._ids_in_periode(rekening_id, periode)
         alles: list = []
         for i in range(0, len(ids), 100):
             if i:
                 time.sleep(self.pauze)
-            alles.extend(verzoek(self._url("financial_mutations/synchronization.json"), self.token,
-                                 "POST", {"ids": ids[i:i + 100]}) or [])
+            alles.extend(_lijst(verzoek(self._url("financial_mutations/synchronization.json"),
+                                        self.token, "POST", {"ids": ids[i:i + 100]})))
         return alles
 
     def mutatie(self, mutatie_id: str) -> dict:
@@ -183,19 +191,16 @@ class MoneybirdClient:
         ) or {}
 
     def mutaties(self, rekening_id: str) -> list[dict]:
-        """Alle bankmutaties van één rekening, via de synchronisatie-API.
+        """Verouderd sinds 0.3.0, gaat weg in 0.4.0; gebruik mutaties_in_periode.
+
+        Alle bankmutaties van één rekening, via de synchronisatie-API.
 
         De gewone lijstweergave weigert boven de honderd mutaties, en dat zijn
         er hier duizenden. De synchronisatie-API haalt eerst alle ID's op en
         daarna de mutaties zelf, honderd per keer.
         """
         pad = self._url("financial_mutations/synchronization.json")
-        antwoord = verzoek(pad, self.token) or []
-        if not isinstance(antwoord, list):
-            raise RuntimeError(
-                f"Onverwacht antwoord van de synchronisatie-API: {type(antwoord).__name__}"
-            )
-        ids = [x["id"] for x in antwoord]
+        ids = [x["id"] for x in _lijst(verzoek(pad, self.token))]
         brokken = (len(ids) + 99) // 100
         log.info("%d mutaties ophalen in %d stappen", len(ids), brokken)
 
@@ -211,3 +216,16 @@ class MoneybirdClient:
             if nummer % 25 == 0 or nummer == brokken:
                 log.info("  %d van de %d stappen", nummer, brokken)
         return [m for m in alles if str(m.get("financial_account_id")) == str(rekening_id)]
+
+
+def _lijst(antwoord) -> list:
+    """Het antwoord van de synchronisatie-API, of een fout als het geen lijst is.
+
+    Een foutobject als lijst lezen zou een lege rekening of een vals gat opleveren.
+    """
+    antwoord = antwoord or []
+    if not isinstance(antwoord, list):
+        raise RuntimeError(
+            f"Onverwacht antwoord van de synchronisatie-API: {type(antwoord).__name__}"
+        )
+    return antwoord

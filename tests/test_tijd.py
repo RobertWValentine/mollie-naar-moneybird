@@ -1,4 +1,6 @@
-from mollie_moneybird_sync.tijd import lokale_datum
+import datetime as dt
+
+from mollie_moneybird_sync.tijd import lokale_datum, utc
 
 
 def test_late_avond_utc_valt_in_nederland_op_de_volgende_dag():
@@ -25,3 +27,11 @@ def test_z_notatie_werkt_ook():
 def test_lege_of_onleesbare_waarde_breekt_niet():
     assert lokale_datum("") == ""
     assert lokale_datum("geen datum") == "geen datum"
+
+
+def test_tijden_met_z_en_offset_worden_gelijk_vergeleken():
+    """Zonder zone geldt UTC; een onleesbare waarde geeft None in plaats van een fout."""
+    assert utc("2026-11-10T04:17:02Z") == utc("2026-11-10T05:17:02+01:00") == utc("2026-11-10T04:17:02")
+    assert utc("2026-11-10T04:17:02Z").tzinfo == dt.timezone.utc
+    assert utc("geen tijd") is None
+    assert utc("") is None

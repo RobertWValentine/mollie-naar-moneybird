@@ -29,7 +29,7 @@ VALUTA = "EUR"  # de valuta van het Mollie-saldo en van de administratie
 
 class NietTeBoeken(ValueError):
     """Een record dat de import niet veilig kan boeken. `verzamel` vangt het per record,
-    boekt de rest en laat de ronde met exitcode 1 eindigen, zodat de hartslag rood wordt."""
+    boekt de rest en laat de ronde met exitcode 4 eindigen, zodat de hartslag rood wordt."""
 
 
 def _afrekenbedrag(record: dict) -> str:

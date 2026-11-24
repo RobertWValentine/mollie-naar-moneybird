@@ -44,3 +44,22 @@ def lokale_datum(tijdstip: str) -> str:
     if moment.tzinfo is None:
         return moment.date().isoformat()
     return moment.astimezone(AMSTERDAM).date().isoformat()
+
+
+def utc(tijdstip: str) -> dt.datetime | None:
+    """Zet een ISO-tijdstip om naar UTC, zodat tijden met `Z` en met een offset vergelijkbaar zijn.
+
+    Zonder tijdzone geldt UTC. Een lege of onleesbare waarde geeft None.
+
+    >>> utc("2026-11-10T05:17:02+01:00").isoformat()
+    '2026-11-10T04:17:02+00:00'
+    """
+    if not tijdstip or not isinstance(tijdstip, str):
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(tijdstip.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=dt.timezone.utc)
+    return moment.astimezone(dt.timezone.utc)

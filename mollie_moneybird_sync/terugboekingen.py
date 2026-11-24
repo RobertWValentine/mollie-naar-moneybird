@@ -59,8 +59,13 @@ def zoek_creditnota(mutatie: dict, facturen: list) -> tuple:
     if not kenmerk:
         return None, "geen chb-kenmerk in de omschrijving"
 
-    treffers = [f for f in facturen
-                if _zelfde_kenmerk(kenmerk, kenmerk_van(f.get("reference") or ""))]
+    # Een exacte treffer gaat voor: in een venster van een week kan een ander
+    # kenmerk staan dat met dit kenmerk begint. Alleen zonder exacte treffer
+    # telt een voorvoegsel, voor een afgekapt kenmerk in de omschrijving.
+    treffers = [f for f in facturen if kenmerk_van(f.get("reference") or "") == kenmerk]
+    if not treffers:
+        treffers = [f for f in facturen
+                    if _zelfde_kenmerk(kenmerk, kenmerk_van(f.get("reference") or ""))]
     if not treffers:
         return None, f"geen creditnota met {kenmerk}"
     if len(treffers) > 1:

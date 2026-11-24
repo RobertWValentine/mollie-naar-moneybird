@@ -69,6 +69,66 @@ class State:
         )
         self.db.commit()
 
+    def _zorg_voor_opentabel(self) -> None:
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS open_niet_te_boeken ("
+            " id TEXT PRIMARY KEY,"
+            " melding TEXT,"
+            " eerst_gezien TEXT DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+    def onthoud_open(self, rijen: list[tuple[str, str]]) -> None:
+        """Onthoudt niet te boeken records, zodat ze gemeld blijven als ze buiten het venster vallen.
+
+        Een record dat al open staat houdt zijn eerste melding en het moment waarop hij
+        voor het eerst gezien is.
+        """
+        self._zorg_voor_opentabel()
+        self.db.executemany(
+            "INSERT OR IGNORE INTO open_niet_te_boeken (id, melding) VALUES (?, ?)",
+            [(i, melding) for i, melding in rijen if i],
+        )
+        self.db.commit()
+
+    def open_niet_geboekt(self) -> list[tuple[str, str]]:
+        """(id, melding) van de open records die nog niet als verwerkt vastliggen, oudste eerst."""
+        self._zorg_voor_opentabel()
+        return [tuple(rij) for rij in self.db.execute(
+            "SELECT id, melding FROM open_niet_te_boeken"
+            " WHERE id NOT IN (SELECT id FROM verwerkt)"
+            " ORDER BY eerst_gezien, rowid"
+        )]
+
+    def vergeet_open(self, ids: list[str]) -> None:
+        self._zorg_voor_opentabel()
+        self.db.executemany("DELETE FROM open_niet_te_boeken WHERE id = ?", [(i,) for i in ids])
+        self.db.commit()
+
+    def _zorg_voor_rondetabel(self) -> None:
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS ronde ("
+            " naam TEXT PRIMARY KEY,"
+            " gestart_op TEXT)"
+        )
+
+    def zet_ronde(self, naam: str, gestart_op: str) -> None:
+        """Legt het begin vast van de laatste ronde die zonder fout eindigde.
+
+        `--aansluiten --dry-run` laat een regel die de state nog niet kent dan even wachten:
+        die is na het begin van die ronde zichtbaar geworden en is geen gat.
+        """
+        self._zorg_voor_rondetabel()
+        self.db.execute(
+            "INSERT OR REPLACE INTO ronde (naam, gestart_op) VALUES (?, ?)",
+            (naam, gestart_op),
+        )
+        self.db.commit()
+
+    def laatste_ronde(self, naam: str) -> str | None:
+        self._zorg_voor_rondetabel()
+        rij = self.db.execute("SELECT gestart_op FROM ronde WHERE naam = ?", (naam,)).fetchone()
+        return rij[0] if rij else None
+
     def aantal(self) -> int:
         return self.db.execute("SELECT COUNT(*) FROM verwerkt").fetchone()[0]
 

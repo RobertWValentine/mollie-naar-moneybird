@@ -65,14 +65,14 @@ def test_ontbrekend_rekening_id_vóór_enig_netwerkverkeer(monkeypatch, capsys):
     assert "MONEYBIRD_FINANCIAL_ACCOUNT_ID" in capsys.readouterr().err
 
 
-def test_geweigerd_token_geeft_een_leesbare_regel(monkeypatch, capsys):
+def test_geweigerd_token_geeft_een_leesbare_regel(monkeypatch, capsys, tmp_path):
     from mollie_moneybird_sync.http import HttpFout
 
     for naam, waarde in [("MOLLIE_TOKEN", "access_x"), ("MONEYBIRD_TOKEN", "mb"),
                          ("MONEYBIRD_ADMINISTRATION_ID", "111"),
                          ("MONEYBIRD_FINANCIAL_ACCOUNT_ID", "222")]:
         monkeypatch.setenv(naam, waarde)
-    monkeypatch.setenv("LOCK_PATH", "/tmp/mollie-moneybird-sync-test.lock")
+    monkeypatch.setenv("LOCK_PATH", str(tmp_path / "test.lock"))
 
     def geweigerd(cfg, dry_run):
         raise HttpFout(401, '{"detail":"Invalid token"}', url="https://api.mollie.com/v2/payments")
