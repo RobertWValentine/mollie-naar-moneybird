@@ -24,6 +24,17 @@ from .sync import (
     open_niet_te_boeken,
 )
 
+VREEMDE_LOCK = (
+    "%s Kijk wie dat bestand neerzette en zet LOCK_PATH op een lokale schijf in een map waar "
+    "alleen deze gebruiker schrijft. Exitcode 3, zodat de bewaking dit ziet."
+)
+OUDE_LOCK = (
+    "%s De lock is %d minuten oud. Het nummer in de lockfile is het proces dat hem vasthoudt; "
+    "kijk met ps -p <nummer> wat het doet en stop het als het vastzit. Verwijder de lockfile "
+    "niet: dan kunnen twee runs tegelijk draaien. Exitcode 3, zodat de bewaking dit ziet."
+)
+# Verwerkt, maar met records die niet te boeken zijn: los van 1 (run mislukt).
+NIET_TE_BOEKEN = 4
 HANDMATIG = re.compile(r"chb_[A-Za-z0-9]+(:teruggedraaid)?|re_[A-Za-z0-9]+")
 
 
@@ -102,6 +113,12 @@ def _handmatig_geboekt(args, config: Config) -> int:
             state.markeer([kenmerk], "handmatig", dt.date.today().isoformat())
             state.sluit()
     except Vergrendeld as e:
+        if e.vreemd:
+            print(VREEMDE_LOCK % e, file=sys.stderr)
+            return 3
+        if e.minuten is not None and e.minuten >= config.lock_alarm_minuten:
+            print(OUDE_LOCK % (e, int(e.minuten)), file=sys.stderr)
+            return 3
         print(f"{e} Probeer het zo opnieuw.", file=sys.stderr)
         return 1
     except HttpFout as e:
@@ -182,18 +199,10 @@ def _voer_uit(args, config: Config) -> int:
                 resultaat = draai(config, dry_run=args.dry_run)
     except Vergrendeld as e:
         if e.vreemd:
-            logging.error(
-                "%s Kijk eerst of het proces met het nummer uit de lockfile nog draait "
-                "(ps -p <nummer>). Verwijder het bestand alleen als dat geen run van dit "
-                "script is. Exitcode 3, zodat de bewaking dit ziet.", e,
-            )
+            logging.error(VREEMDE_LOCK, e)
             return 3
         if e.minuten is not None and e.minuten >= config.lock_alarm_minuten:
-            logging.error(
-                "%s De lock is %d minuten oud. Draait dat proces echt nog? Zo niet, "
-                "verwijder de lockfile. Exitcode 3, zodat de bewaking dit ziet.",
-                e, int(e.minuten),
-            )
+            logging.error(OUDE_LOCK, e, int(e.minuten))
             return 3
         logging.warning(str(e))
         return 0
@@ -236,7 +245,8 @@ def _voer_uit(args, config: Config) -> int:
             f"{resultaat['bestaande_mutaties']} bestaande mutaties, "
             f"{resultaat['regels']} Mollie-regels, "
             f"{resultaat['al_geboekt']} al geboekt, "
-            f"{resultaat['ontbreekt']} ontbrak{staart}"
+            f"{resultaat['ontbreekt']} ontbrak, "
+            f"{resultaat.get('wacht', 0)} wacht op de volgende ronde{staart}"
         )
     else:
         print(f"{resultaat['regels']} regels{staart}")
@@ -244,7 +254,7 @@ def _voer_uit(args, config: Config) -> int:
         # De rest is verwerkt (bij een dry run alleen getoond); de exitcode zet de hartslag
         # op rood. Het log noemt de kenmerken.
         print(f"{resultaat['niet_te_boeken']} niet te boeken, zie het log", file=sys.stderr)
-        return 1
+        return NIET_TE_BOEKEN
     return 0
 
 

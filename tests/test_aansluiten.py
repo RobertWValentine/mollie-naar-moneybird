@@ -1,3 +1,6 @@
+import datetime as dt
+
+from mollie_moneybird_sync import sync
 from mollie_moneybird_sync.aansluiten import kenmerken_van, splits
 
 # Mutaties zoals een eerdere koppeling ze in Moneybird zette.
@@ -107,3 +110,63 @@ def test_lege_rekening_levert_alles_als_ontbrekend():
     regels = [_regel("tr_x", "2026-08-11", "8.00", "Mollie Payment - X - tr_x")]
     geboekt, ontbreekt = splits(regels, [])
     assert not geboekt and len(ontbreekt) == 1
+
+
+def test_aansluitperiodes_zijn_minstens_vorig_jaar_en_dit_jaar_tot_morgen():
+    assert sync._aansluitperiodes(dt.date(2026, 11, 23), 30) == ["20250101..20251231", "20260101..20261124"]
+    assert sync._aansluitperiodes(dt.date(2027, 1, 3), 3) == ["20260101..20261231", "20270101..20270104"]
+    # Op oudejaarsdag valt morgen in het volgende jaar: een eigen periode, nooit over de jaargrens.
+    assert sync._aansluitperiodes(dt.date(2026, 12, 31), 3) == [
+        "20250101..20251231", "20260101..20261231", "20270101..20270101"]
+
+
+def test_aansluitperiodes_dekken_een_venster_van_voor_vorig_jaar():
+    # 23 nov 2026 min 700 dagen min een week = 16 dec 2024: twee jaargrenzen over.
+    assert sync._aansluitperiodes(dt.date(2026, 11, 23), 700) == [
+        "20241216..20241231", "20250101..20251231", "20260101..20261124"]
+    # Vroeg in januari reikt een venster van 3 dagen plus een week niet voor vorig jaar.
+    assert sync._aansluitperiodes(dt.date(2027, 1, 3), 3)[0] == "20260101..20261231"
+
+
+LAATSTE = "2026-11-10T04:17:02+00:00"
+NU = dt.datetime(2026, 11, 10, 4, 20, tzinfo=dt.timezone.utc)
+
+
+def test_regel_die_de_state_niet_kent_wacht_na_een_verse_ronde():
+    regel = {"sleutel": "tr_verzonnenN", "tijd": "2026-11-09T12:00:00+00:00"}
+    assert sync._wacht_op_ronde([regel], lambda s: False, LAATSTE, NU, 3, 14) == ([regel], [])
+
+
+def test_regel_die_de_state_kent_en_ontbreekt_is_een_echt_gat():
+    regel = {"sleutel": "tr_verzonnenG", "tijd": "2026-11-10T04:19:00+00:00"}
+    assert sync._wacht_op_ronde([regel], lambda s: True, LAATSTE, NU, 3, 14) == ([], [regel])
+
+
+def test_refund_aangemaakt_voor_de_ronde_en_later_afgerond_wacht():
+    refund = {"sleutel": "re_verzonnenL", "tijd": "2026-11-10T01:17:00+00:00"}  # createdAt 3 uur ervoor
+    assert sync._wacht_op_ronde([refund], lambda s: False, LAATSTE, NU, 3, 14) == ([refund], [])
+
+
+def test_oude_ronde_laat_niets_wachten():
+    regel = {"sleutel": "tr_verzonnenS", "tijd": "2026-11-10T04:18:30+00:00"}
+    later = NU + dt.timedelta(hours=3)
+    assert sync._wacht_op_ronde([regel], lambda s: False, LAATSTE, later, 3, 14) == ([], [regel])
+
+
+def test_groter_venster_dan_de_ronde_laat_niets_wachten():
+    regel = {"sleutel": "tr_verzonnenW", "tijd": "2026-10-20T10:00:00+00:00"}
+    assert sync._wacht_op_ronde([regel], lambda s: False, LAATSTE, NU, 30, 14) == ([], [regel])
+
+
+def test_zonder_laatste_ronde_wacht_niets():
+    regel = {"sleutel": "tr_verzonnenZ", "tijd": "2026-11-10T04:18:30+00:00"}
+    assert sync._wacht_op_ronde([regel], lambda s: False, None, NU, 3, 14) == ([], [regel])
+    assert sync._wacht_op_ronde([regel], lambda s: False, "onleesbaar", NU, 3, 14) == ([], [regel])
+
+
+def test_wachten_mag_tot_en_met_de_maximale_leeftijd():
+    regel = {"sleutel": "tr_verzonnenR", "tijd": ""}
+    grens = sync.utc(LAATSTE) + sync.RONDE_MAX_LEEFTIJD
+    assert sync._wacht_op_ronde([regel], lambda s: False, LAATSTE, grens, 14, 14) == ([regel], [])
+    voorbij = grens + dt.timedelta(seconds=1)
+    assert sync._wacht_op_ronde([regel], lambda s: False, LAATSTE, voorbij, 14, 14) == ([], [regel])

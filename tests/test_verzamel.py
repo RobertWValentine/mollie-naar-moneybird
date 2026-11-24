@@ -1,5 +1,8 @@
 """verzamel en de rondes: een record dat niet veilig te boeken is, laat de ronde zichtbaar falen."""
+import datetime as dt
 import logging
+import re
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +118,21 @@ class NepState:
     def gezien(self, sleutel):
         return True
 
+    def onthoud_open(self, rijen):
+        pass
+
+    def open_niet_geboekt(self):
+        return []
+
+    def vergeet_open(self, ids):
+        pass
+
+    def laatste_ronde(self, naam):
+        return None
+
+    def zet_ronde(self, naam, gestart_op):
+        pass
+
     def sluit(self):
         pass
 
@@ -127,7 +145,9 @@ class NepStateNieuw(NepState):
 def _nep_ronde(monkeypatch, state=NepState, mutaties=()):
     mollie = NepMollie()
     monkeypatch.setattr(sync, "MollieClient", lambda token: mollie)
-    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: SimpleNamespace(mutaties=lambda rekening: list(mutaties)))
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: SimpleNamespace(
+        mutaties_in_periode=lambda rekening, periode: list(mutaties),
+        aantal_mutaties=lambda rekening, periode: len(mutaties)))
     monkeypatch.setattr(sync, "State", lambda pad: state())
     monkeypatch.setattr(sync, "_controleer_intentie", lambda state: None)
     config = SimpleNamespace(mollie_token="m", moneybird_token="mb", administratie_id="1",
@@ -207,21 +227,27 @@ def _omgeving(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCK_PATH", str(tmp_path / "test.lock"))
 
 
-def test_aansluiten_met_niet_te_boeken_geeft_exitcode_1_en_meldt_het(monkeypatch, tmp_path, capsys):
+def test_aansluiten_met_niet_te_boeken_geeft_exitcode_4_en_meldt_het(monkeypatch, tmp_path, capsys):
     _omgeving(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "aansluiten", lambda cfg, **k: {
         "bestaande_mutaties": 5, "regels": 3, "al_geboekt": 2, "ontbreekt": 1,
         "afschrift_id": "x", "niet_te_boeken": 1})
-    assert cli.main(["--aansluiten"]) == 1
+    assert cli.main(["--aansluiten"]) == 4
     assert "1 niet te boeken, zie het log" in capsys.readouterr().err
 
 
-def test_ronde_met_niet_te_boeken_regels_geeft_exitcode_1(monkeypatch, tmp_path):
+def test_ronde_met_niet_te_boeken_regels_geeft_exitcode_4(monkeypatch, tmp_path):
     _omgeving(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: {"regels": 3, "afschrift_id": "x", "niet_te_boeken": 1})
-    assert cli.main([]) == 1
+    assert cli.main([]) == 4
     monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: {"regels": 3, "afschrift_id": "x", "niet_te_boeken": 0})
     assert cli.main([]) == 0
+
+
+def test_mislukte_run_blijft_exitcode_1(monkeypatch, tmp_path):
+    _omgeving(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "draai", lambda cfg, dry_run: (_ for _ in ()).throw(RuntimeError("kapot")))
+    assert cli.main([]) == 1
 
 
 def _handmatig_omgeving(monkeypatch, tmp_path, mollie=None):
@@ -381,3 +407,361 @@ def test_controleer_noemt_een_ontoetsbare_afrekening_zonder_nan():
                                              "amount": {"value": "0.00", "currency": "EUR"}, "periods": {}})
     assert uit["toetsbaar"] is False and uit["sluit"] is False
     assert uit["verschil"] == uit["verschil"]  # geen NaN
+
+
+def _echte_ronde(monkeypatch, tmp_path, mollie=None, mutaties=()):
+    """Een ronde met een echte state op schijf; _schrijf onthoudt de regels zonder Moneybird."""
+    mollie = mollie or NepMollie()
+    pad = str(tmp_path / "state.db")
+    monkeypatch.setattr(sync, "MollieClient", lambda token: mollie)
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: SimpleNamespace(
+        mutaties_in_periode=lambda rekening, periode: list(mutaties),
+        aantal_mutaties=lambda rekening, periode: len(mutaties)))
+
+    def schrijf(moneybird, config, state, regels, *a):
+        state.markeer([r["sleutel"] for r in regels], "afschrift_1", regels[-1]["date"])
+        return "afschrift_1"
+
+    monkeypatch.setattr(sync, "_schrijf", schrijf)
+    config = SimpleNamespace(mollie_token="m", moneybird_token="mb", administratie_id="1",
+                             rekening_id="2", state_pad=pad, max_terugkijk_dagen=14)
+    return config, mollie
+
+
+def _open_in(pad):
+    state = State(pad)
+    try:
+        return state.open_niet_geboekt()
+    finally:
+        state.sluit()
+
+
+def _buiten_het_venster(mollie):
+    mollie.chargebacks = lambda grens: []
+    mollie.refunds = lambda grens: []
+
+
+def test_open_record_buiten_het_venster_blijft_meetellen(monkeypatch, tmp_path, caplog):
+    config, mollie = _echte_ronde(monkeypatch, tmp_path)
+    assert sync.draai(config)["niet_te_boeken"] == 1
+    _buiten_het_venster(mollie)
+    with caplog.at_level(logging.ERROR):
+        assert sync.draai(config)["niet_te_boeken"] == 1
+    assert "chb_verzonnenUSD" in caplog.text and "(buiten het venster)" in caplog.text
+    assert sync.draai(config, dry_run=True)["niet_te_boeken"] == 1
+
+
+def test_droge_ronde_schrijft_geen_open_records(monkeypatch, tmp_path):
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    assert sync.draai(config, dry_run=True)["niet_te_boeken"] == 1
+    assert sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)["niet_te_boeken"] == 1
+    assert _open_in(config.state_pad) == []
+
+
+def test_handmatig_geboekt_sluit_een_open_record_buiten_het_venster(monkeypatch, tmp_path):
+    config, mollie = _echte_ronde(monkeypatch, tmp_path)
+    _omgeving(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATE_PATH", config.state_pad)
+    assert sync.draai(config)["niet_te_boeken"] == 1
+    _buiten_het_venster(mollie)
+    assert cli.main(["--handmatig-geboekt", "chb_verzonnenUSD"]) == 0
+    assert sync.draai(config)["niet_te_boeken"] == 0
+
+
+def test_open_record_buiten_het_venster_sluit_alleen_met_handmatig_geboekt(monkeypatch, tmp_path):
+    """De handboeking staat in Moneybird met een datum buiten de periode. Die telt niet: de rij
+    blijft open en gemeld tot --handmatig-geboekt."""
+    handboeking = [{"id": "1", "date": "2026-12-01", "amount": "-40.00",
+                    "message": "Mollie Chargeback - chb_verzonnenUSD - tr_verzonnenUSD"}]
+    config, mollie = _echte_ronde(monkeypatch, tmp_path, mutaties=handboeking)
+    _omgeving(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATE_PATH", config.state_pad)
+    state = State(config.state_pad)
+    state.onthoud_open([("chb_verzonnenUSD", "chb_verzonnenUSD in USD zonder settlementAmount")])
+    state.sluit()
+    _buiten_het_venster(mollie)
+    assert sync.aansluiten(config, dagen=3)["niet_te_boeken"] == 1
+    assert [i for i, _ in _open_in(config.state_pad)] == ["chb_verzonnenUSD"]
+    assert cli.main(["--handmatig-geboekt", "chb_verzonnenUSD"]) == 0
+    assert sync.aansluiten(config, dagen=3)["niet_te_boeken"] == 0
+    assert _open_in(config.state_pad) == []
+
+
+def test_aansluiten_legt_een_open_rij_van_buiten_het_venster_niet_als_bestond_al_vast(monkeypatch, tmp_path):
+    """Alleen een fout uit het huidige venster mag als bestond-al vast."""
+    al_daar = [{"id": "1", "date": "2026-12-01", "amount": "-40.00",
+                "message": "Mollie Chargeback - chb_verzonnenUSD - tr_verzonnenUSD"}]
+    config, mollie = _echte_ronde(monkeypatch, tmp_path, mutaties=al_daar)
+    state = State(config.state_pad)
+    state.onthoud_open([("chb_verzonnenUSD", "melding")])
+    state.sluit()
+    _buiten_het_venster(mollie)
+    assert sync.aansluiten(config, dagen=3)["niet_te_boeken"] == 1
+    assert sync.aansluiten(config, dagen=3, dry_run=True)["niet_te_boeken"] == 1
+    assert [i for i, _ in _open_in(config.state_pad)] == ["chb_verzonnenUSD"]
+
+
+def test_open_record_dat_in_het_venster_geen_fout_meer_is_telt_niet_meer(monkeypatch, tmp_path):
+    config, mollie = _echte_ronde(monkeypatch, tmp_path)
+    state = State(config.state_pad)
+    state.onthoud_open([("re_verzonnenZonder", "re_verzonnenZonder zonder betaalmethode")])
+    state.sluit()
+    mollie.chargebacks = lambda grens: []
+    mollie.refunds = lambda grens: [dict(REFUND_ZONDER_BETALING, _embedded={"payment": {"method": "paypal"}})]
+    assert sync.draai(config, dry_run=True)["niet_te_boeken"] == 0
+    assert [i for i, _ in _open_in(config.state_pad)] == ["re_verzonnenZonder"]
+    assert sync.draai(config)["niet_te_boeken"] == 0
+    assert _open_in(config.state_pad) == []
+
+
+def test_met_open_uit_state_kent_ook_de_teruggedraaide_sleutel(tmp_path):
+    state = State(str(tmp_path / "state.db"))
+    state.onthoud_open([("chb_verzonnenUSD:teruggedraaid", "melding")])
+    fouten = []
+    sync.verzamel(SimpleNamespace(
+        betalingen=lambda grens: [], refunds=lambda grens: [], afrekeningen=lambda: [],
+        chargebacks=lambda grens: [dict(CHARGEBACK_USD, reversedAt="2027-01-07T12:00:00+00:00")],
+    ), "2027-01-01", fouten)
+    assert sync._met_open_uit_state(fouten, state, set()) == fouten
+    state.sluit()
+
+
+def test_verzamel_noemt_elke_terugboeking_en_refund_in_het_venster():
+    gezien_in_venster = set()
+    mollie = NepMollie()
+    mollie.chargebacks = lambda grens: [dict(CHARGEBACK_USD, reversedAt="2027-01-07T12:00:00+00:00"),
+                                        CHARGEBACK_EUR]
+    sync.verzamel(mollie, "2027-01-01", [], gezien_in_venster=gezien_in_venster)
+    assert gezien_in_venster == {"chb_verzonnenUSD", "chb_verzonnenUSD:teruggedraaid",
+                                 "chb_verzonnenEUR", "re_verzonnenZonder"}
+
+
+def _laatste_ronde(pad):
+    state = State(pad)
+    try:
+        return state.laatste_ronde("mollie")
+    finally:
+        state.sluit()
+
+
+def test_draai_legt_het_begin_van_de_ronde_vast_en_een_droge_ronde_niet(monkeypatch, tmp_path):
+    config, mollie = _echte_ronde(monkeypatch, tmp_path)
+    momenten = []
+    echt = sync.verzamel
+
+    def verzamel(*a, **k):
+        momenten.append(dt.datetime.now(dt.timezone.utc))
+        return echt(*a, **k)
+
+    monkeypatch.setattr(sync, "verzamel", verzamel)
+    sync.draai(config, dry_run=True)
+    assert _laatste_ronde(config.state_pad) is None
+
+    sync.draai(config)
+    eerste = _laatste_ronde(config.state_pad)
+    assert sync.utc(eerste) <= momenten[-1]
+    assert momenten[-1] - sync.utc(eerste) < dt.timedelta(minutes=1)
+
+    # Ook een ronde zonder iets nieuws telt: hij heeft het venster nagelopen.
+    assert sync.draai(config)["regels"] == 0
+    assert sync.utc(_laatste_ronde(config.state_pad)) >= sync.utc(eerste)
+
+
+def test_mislukte_ronde_legt_niets_vast(monkeypatch, tmp_path):
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    monkeypatch.setattr(sync, "_schrijf", lambda *a: (_ for _ in ()).throw(RuntimeError("kapot")))
+    with pytest.raises(RuntimeError):
+        sync.draai(config)
+    assert _laatste_ronde(config.state_pad) is None
+
+
+def test_schrijvende_aansluiting_legt_de_ronde_vast_en_een_droge_niet(monkeypatch, tmp_path):
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)
+    assert _laatste_ronde(config.state_pad) is None
+    sync.aansluiten(config, dagen=3, forceer_leeg=True)
+    assert _laatste_ronde(config.state_pad) is not None
+
+
+def test_aansluiten_vergelijkt_alleen_met_de_periodes(monkeypatch):
+    config, _ = _nep_ronde(monkeypatch, state=NepStateNieuw)
+    opgevraagd, geteld = [], []
+    al_daar = [{"id": "1", "date": "2027-01-05", "amount": "2.50",
+                "message": "Mollie Chargeback - chb_verzonnenEUR - tr_verzonnenEUR"}]
+    # Zonder `mutaties`: wie toch alle mutaties ophaalt, valt om.
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: SimpleNamespace(
+        mutaties_in_periode=lambda rekening, periode: opgevraagd.append((rekening, periode)) or list(al_daar),
+        aantal_mutaties=lambda rekening, periode: geteld.append((rekening, periode)) or 1))
+    uit = sync.aansluiten(config, dagen=3, dry_run=True)
+    vandaag = dt.date.today()
+    periodes = sync._aansluitperiodes(vandaag, 3)
+    morgen = min(vandaag + dt.timedelta(days=1), dt.date(vandaag.year, 12, 31))
+    assert periodes[:2] == [f"{vandaag.year - 1}0101..{vandaag.year - 1}1231",
+                            f"{vandaag.year}0101..{morgen:%Y%m%d}"]
+    assert opgevraagd == geteld == [("2", p) for p in periodes]
+    assert uit["bestaande_mutaties"] == len(periodes)
+
+
+def test_lege_rekening_telt_over_vorig_en_dit_jaar(monkeypatch):
+    config, _ = _nep_ronde(monkeypatch, state=NepStateNieuw)
+    tellingen = {"vorig": 0, "dit": 0}
+
+    def aantal(rekening, periode):
+        return tellingen["vorig" if periode.startswith(str(dt.date.today().year - 1)) else "dit"]
+
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: SimpleNamespace(
+        mutaties_in_periode=lambda rekening, periode: [], aantal_mutaties=aantal))
+    with pytest.raises(RuntimeError, match="--forceer-leeg"):
+        sync.aansluiten(config, dagen=3, dry_run=True)
+    assert sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)["ontbreekt"] == 2
+    tellingen["vorig"] = 5  # alles in vorig jaar, nog niets in de periode van dit jaar
+    assert sync.aansluiten(config, dagen=3, dry_run=True)["ontbreekt"] == 2
+
+
+def _verse_ronde(pad, minuten_geleden=3):
+    state = State(pad)
+    gestart = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minuten_geleden)
+    state.zet_ronde("mollie", gestart.isoformat(timespec="seconds"))
+    return state
+
+
+def test_droge_aansluiting_laat_nieuwe_regels_wachten_op_de_ronde(monkeypatch, tmp_path):
+    """Een regel die de state niet kent, is na de laatste ronde zichtbaar geworden: geen gat."""
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    _verse_ronde(config.state_pad).sluit()
+    uit = sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)
+    assert (uit["ontbreekt"], uit["wacht"]) == (0, 2)
+
+
+def test_droge_aansluiting_meldt_een_bekende_regel_die_ontbreekt(monkeypatch, tmp_path):
+    """De state kent hem wel, Moneybird niet: een echt gat, dat nooit wacht."""
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    state = _verse_ronde(config.state_pad)
+    state.markeer(["chb_verzonnenEUR"], "afschrift_weg", "2027-01-05")
+    state.sluit()
+    uit = sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)
+    assert (uit["ontbreekt"], uit["wacht"]) == (1, 1)
+
+
+def test_droge_aansluiting_zonder_verse_ronde_laat_niets_wachten(monkeypatch, tmp_path):
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    _verse_ronde(config.state_pad, minuten_geleden=3 * 60).sluit()
+    uit = sync.aansluiten(config, dagen=3, dry_run=True, forceer_leeg=True)
+    assert (uit["ontbreekt"], uit["wacht"]) == (2, 0)
+    _verse_ronde(config.state_pad).sluit()
+    uit = sync.aansluiten(config, dagen=30, dry_run=True, forceer_leeg=True)
+    assert (uit["ontbreekt"], uit["wacht"]) == (2, 0)
+
+
+def test_schrijvende_aansluiting_laat_niets_wachten(monkeypatch, tmp_path):
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    _verse_ronde(config.state_pad).sluit()
+    uit = sync.aansluiten(config, dagen=3, forceer_leeg=True)
+    assert (uit["ontbreekt"], uit["wacht"]) == (2, 0)
+
+
+def test_uitvoer_aansluiten_houdt_0_ontbrak_voor_de_bewaking(monkeypatch, tmp_path, capsys):
+    _omgeving(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "aansluiten", lambda cfg, **k: {
+        "bestaande_mutaties": 900, "regels": 80, "al_geboekt": 10, "ontbreekt": 0, "wacht": 70,
+        "afschrift_id": None, "niet_te_boeken": 0, "dry_run": True})
+    assert cli.main(["--aansluiten", "--dagen", "3", "--dry-run"]) == 0
+    regel = capsys.readouterr().out.strip().splitlines()[-1]
+    assert re.search(r"(^|, )0 ontbrak", regel) and "70 wacht op de volgende ronde" in regel
+    assert regel == ("900 bestaande mutaties, 80 Mollie-regels, 10 al geboekt, 0 ontbrak, "
+                     "70 wacht op de volgende ronde")
+
+
+def _in_periode(mutaties):
+    """Een nep-Moneybird die, zoals de echte, alleen de mutaties van de gevraagde periode geeft."""
+    def ophalen(rekening, periode):
+        van, tot = periode.split("..")
+        return [m for m in mutaties if van <= m["date"].replace("-", "") <= tot]
+    return SimpleNamespace(mutaties_in_periode=ophalen,
+                           aantal_mutaties=lambda rekening, periode: len(ophalen(rekening, periode)))
+
+
+def test_handboeking_van_vorig_jaar_wordt_niet_opnieuw_geboekt(monkeypatch, tmp_path):
+    """Met de hand geboekt op een oude datum, ruim voor het venster: telt als al geboekt."""
+    vorig_jaar = f"{dt.date.today().year - 1}-06-01"
+    handboeking = [{"id": "1", "date": vorig_jaar, "amount": "-2.50",
+                    "message": "Mollie Chargeback - chb_verzonnenEUR - tr_verzonnenEUR"}]
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: _in_periode(handboeking))
+    geschreven = []
+    monkeypatch.setattr(sync, "_schrijf", lambda mb, cfg, state, regels, *a:
+                        geschreven.extend(r["sleutel"] for r in regels) or "afschrift_1")
+    droog = sync.aansluiten(config, dagen=3, dry_run=True)
+    uit = sync.aansluiten(config, dagen=3)
+    assert droog["al_geboekt"] == uit["al_geboekt"] == 1
+    assert droog["ontbreekt"] == uit["ontbreekt"] == 1
+    assert geschreven == ["re_verzonnenZonder"]
+    state = State(config.state_pad)
+    assert state.gezien("chb_verzonnenEUR")
+    state.sluit()
+
+
+def test_groot_venster_boekt_een_oude_regel_niet_opnieuw(monkeypatch, tmp_path):
+    """--dagen tot voor 1 januari van vorig jaar, lege state: Moneybird moet het hele venster dekken."""
+    vandaag = dt.date.today()
+    oud = dt.date(vandaag.year - 2, 6, 1)
+    mollie = NepMollie()
+    mollie.chargebacks = lambda grens: [dict(CHARGEBACK_EUR, createdAt=f"{oud}T12:00:00+00:00")]
+    mollie.refunds = lambda grens: []
+    in_moneybird = [
+        {"id": "1", "date": oud.isoformat(), "amount": "-2.50",
+         "message": "Mollie Chargeback - chb_verzonnenEUR - tr_verzonnenEUR"},
+        {"id": "2", "date": vandaag.isoformat(), "amount": "1.00", "message": "iets anders"},
+    ]
+    config, _ = _echte_ronde(monkeypatch, tmp_path, mollie=mollie)
+    monkeypatch.setattr(sync, "MoneybirdClient", lambda *a: _in_periode(in_moneybird))
+    geschreven = []
+    monkeypatch.setattr(sync, "_schrijf", lambda mb, cfg, state, regels, *a:
+                        geschreven.extend(r["sleutel"] for r in regels) or "afschrift_1")
+    dagen = (vandaag - oud).days + 10
+    droog = sync.aansluiten(config, dagen=dagen, dry_run=True)
+    uit = sync.aansluiten(config, dagen=dagen)
+    assert droog["al_geboekt"] == uit["al_geboekt"] == 1
+    assert droog["ontbreekt"] == uit["ontbreekt"] == 0
+    assert geschreven == []
+
+
+def _state_van_020(pad):
+    """Een state zoals 0.2.0 hem achterliet: alleen de tabellen verwerkt en intentie."""
+    con = sqlite3.connect(pad)
+    con.execute("CREATE TABLE verwerkt (id TEXT PRIMARY KEY, afschrift_id TEXT, datum TEXT,"
+                " toegevoegd_op TEXT DEFAULT CURRENT_TIMESTAMP)")
+    con.execute("CREATE TABLE intentie (referentie TEXT PRIMARY KEY, aantal INTEGER,"
+                " gestart_op TEXT DEFAULT CURRENT_TIMESTAMP)")
+    con.execute("INSERT INTO verwerkt (id, afschrift_id, datum)"
+                " VALUES ('tr_verzonnenVoorDeUpdate', 'afschrift_0', '2026-11-01')")
+    con.commit()
+    con.close()
+
+
+def _tabellen(pad):
+    con = sqlite3.connect(pad)
+    try:
+        return {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        con.close()
+
+
+def test_state_van_020_werkt_zonder_migratie(monkeypatch, tmp_path, capsys):
+    """Een ronde, een droge --aansluiten en --handmatig-geboekt draaien op een state van 0.2.0."""
+    config, _ = _echte_ronde(monkeypatch, tmp_path)
+    _state_van_020(config.state_pad)
+    assert _tabellen(config.state_pad) == {"verwerkt", "intentie"}
+    _omgeving(monkeypatch, tmp_path)
+    monkeypatch.setenv("STATE_PATH", config.state_pad)
+
+    assert cli.main([]) == 4  # geboekt, met chb_verzonnenUSD als niet te boeken
+    assert cli.main(["--aansluiten", "--dry-run", "--dagen", "3", "--forceer-leeg"]) == 4
+    assert cli.main(["--handmatig-geboekt", "chb_verzonnenUSD"]) == 0
+    assert "Traceback" not in "".join(capsys.readouterr())
+
+    assert _gezien_in(config.state_pad, "tr_verzonnenVoorDeUpdate")
+    assert _gezien_in(config.state_pad, "chb_verzonnenEUR")
+    assert _gezien_in(config.state_pad, "chb_verzonnenUSD")
+    assert _open_in(config.state_pad) == []
+    assert _laatste_ronde(config.state_pad) is not None

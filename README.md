@@ -153,22 +153,23 @@ Gebruik je nu een andere dienst die Mollie-transacties in Moneybird zet, trek di
 ./bin/run.sh --aansluiten --dry-run --dagen 30
 ```
 
-Dit schrijft niets. Het vergelijkt de laatste 30 dagen bij Mollie met wat er al op de rekening in Moneybird staat. Bij een rekening met veel regels duurt dat een paar minuten, omdat Moneybird maar 150 verzoeken per 5 minuten toestaat. Je ziet zoiets als:
+Dit schrijft niets. Het vergelijkt de laatste 30 dagen bij Mollie met de mutaties op de rekening in Moneybird van die 30 dagen plus een week. Dat zijn er minstens die van heel vorig jaar en dit jaar. Zo herkent het ook een regel die met de hand op een oudere datum is geboekt. Bij een rekening met veel regels duurt dat een paar minuten, omdat Moneybird maar 150 verzoeken per 5 minuten toestaat. Je ziet zoiets als:
 
 ```
 2026-09-27 10:15:02,114 INFO Bestaande mutaties ophalen uit Moneybird...
 2026-09-27 10:17:40,882 INFO 1204 mutaties gevonden op rekening 438765432109876543
 2026-09-27 10:17:44,310 INFO Opgehaald: 312 regels (betalingen 280, chargebacks 9, refunds 2, afrekeningen 21)
-2026-09-27 10:17:44,402 INFO Al geboekt: 305. Nog te boeken: 7.
+2026-09-27 10:17:44,402 INFO Al geboekt: 305. Nog te boeken: 7. Wacht op de volgende ronde: 0.
 2026-09-27 10:17:44,403 INFO   ONTBREEKT 2026-09-26       8.00  Mollie Payment - J. Jansen - Bestelling 10712 - tr_...
 ...
-1204 bestaande mutaties, 312 Mollie-regels, 305 al geboekt, 7 ontbrak
+1204 bestaande mutaties, 312 Mollie-regels, 305 al geboekt, 7 ontbrak, 0 wacht op de volgende ronde
 ```
 
 Zo lees je het:
 
 - **Een klein aantal ontbrekend** betekent dat je vorige koppeling iets achterliep. Normaal.
 - **Honderden ontbrekend** op een rekening die al jaren gevuld wordt: stop en zoek eerst uit waarom. Vaak boekte de vorige koppeling op een andere datum.
+- **Wacht op de volgende ronde** zie je alleen als de import al loopt. Een regel die het script nog niet kent, telt vlak na een geslaagde ronde (tot 2 uur na haar begin) niet als ontbrekend: hij is na het begin van die ronde bij Mollie verschenen en de volgende ronde boekt hem. Een regel die het script al geboekt had en die in Moneybird ontbreekt, telt altijd als ontbrekend. Kijk je verder terug dan `MAX_LOOKBACK_DAYS`, dan wacht er niets.
 - **Een lege rekening** geeft een foutmelding. Dat vangnet zit erin omdat een verkeerd rekening-ID anders het hele venster als ontbrekend zou boeken. Is de rekening echt nieuw en leeg, draai dan met `--forceer-leeg`.
 
 ### 8. Aansluiten
@@ -180,10 +181,10 @@ Klopt de droogloop, draai hem dan echt:
 ```
 
 ```
-1204 bestaande mutaties, 312 Mollie-regels, 305 al geboekt, 7 ontbrak, afschrift 445566778899001122
+1204 bestaande mutaties, 312 Mollie-regels, 305 al geboekt, 7 ontbrak, 0 wacht op de volgende ronde, afschrift 445566778899001122
 ```
 
-In Moneybird staat nu één nieuw afschrift met de ontbrekende regels. Wat al geboekt was, onthoudt het script, zodat het dat nooit opnieuw boekt. Je mag `--aansluiten` zo vaak draaien als je wilt: het kijkt steeds naar wat er feitelijk op de rekening staat.
+In Moneybird staat nu één nieuw afschrift met de ontbrekende regels. Wat al geboekt was, onthoudt het script, zodat het dat nooit opnieuw boekt. Je mag `--aansluiten` zo vaak draaien als je wilt: het kijkt steeds naar wat er feitelijk op de rekening staat. Dat doet het over het venster plus een week, minstens over vorig jaar en dit jaar.
 
 ### 9. Controleren
 
@@ -257,11 +258,23 @@ Zet hem aan met `launchctl load ~/Library/LaunchAgents/mollie-moneybird-sync.pli
 
 Slaapt de machine, dan slaat een ronde over en haalt de volgende alles in: het script kijkt `MAX_LOOKBACK_DAYS` terug (standaard 14) en slaat over wat al verwerkt is. Lag hij langer plat, draai dan eenmalig `--aansluiten --dagen` met een ruimer venster.
 
-**Bijwerken.** `git pull` in de map. Wat al verwerkt is staat in de state (`STATE_PATH`) en blijft bewaard.
+**Bijwerken.** `git pull` in de map. Wat al verwerkt is staat in de state (`STATE_PATH`) en blijft bewaard. Werk bij tussen twee rondes, op een moment waarop geen ronde loopt. Vanaf 0.3.0 werkt de lock met `flock` en blijft de lockfile staan; verwijder hem niet.
 
 **Stoppen.** Haal de cronregel weg of doe `launchctl unload` op de plist. Er blijft niets draaien.
 
 ## Als er iets misgaat
+
+De exitcode zegt hoe een run eindigde:
+
+| exitcode | betekenis |
+|---|---|
+| 0 | klaar, of een gewone overlap met een andere run |
+| 1 | de run is mislukt; ook `--controleer` met een afwijkende afrekening, een verschil in het PayPal-saldo en `--handmatig-geboekt` terwijl een andere run de lock heeft |
+| 2 | een instelling of het gebruik klopt niet |
+| 3 | de lock is vreemd, niet te nemen of te lang bezet, ook bij `--handmatig-geboekt` |
+| 4 | verwerkt, met N records die niet te boeken zijn |
+
+Stuur je na de run een seintje naar een hartslagmonitor met `run.sh && curl ...`, dan blijft dat seintje bij elke code behalve 0 weg. Toets je in een script op exitcode 1, voeg dan 4 toe.
 
 | wat je ziet | wat het betekent |
 |---|---|
@@ -269,12 +282,12 @@ Slaapt de machine, dan slaat een ronde over en haalt de volgende alles in: het s
 | `Mollie weigert het verzoek` of `Moneybird weigert het verzoek` | het token klopt niet, hoort bij een andere administratie of mist rechten. Maak het opnieuw aan volgens stap 2 of 3 |
 | `Tijdzonedata voor Europe/Amsterdam ontbreekt` | installeer `tzdata`, zie stap 1 |
 | `Rekening ... bevat geen enkele mutatie` | verkeerd rekening-ID of token van een andere administratie; bij een echt lege rekening `--forceer-leeg` |
-| exitcode 1 zonder "niet te boeken" | de run is gestopt, er is niets half geboekt |
-| exitcode 1 met `N niet te boeken, zie het log` | de rest is wel verwerkt (bij `--dry-run` alleen getoond). Per record staat in het log `Niet geboekt: ... (na een handmatige boeking vastleggen: <kenmerken>)`: een terugboeking of refund die nog niet geboekt is en die het script niet veilig kan boeken (een andere valuta dan euro zonder `settlementAmount`, een refund zonder betaalmethode of een refund waarvan de betaling niet bestaat). Zoek eerst op het kenmerk in Moneybird; staat hij er al, sla het boeken dan over. Anders boek je hem met de hand op de Mollie-rekening, met het eurobedrag uit de afrekening en precies deze omschrijving, zodat de andere rondes hem herkennen: `Mollie Chargeback - <chb_kenmerk> - <tr_kenmerk>` (afschrijving), `Mollie Chargeback Reversed - <chb_kenmerk> - <tr_kenmerk>` (bijschrijving) of `Mollie Refund - <re_kenmerk> - <tr_kenmerk>` (afschrijving). Leg daarna elk genoemd kenmerk vast met `./bin/run.sh --handmatig-geboekt <kenmerk>`; met `--dry-run` erbij schrijft het niets. Het accepteert alleen kenmerken die nu openstaan. Doe het binnen `MAX_LOOKBACK_DAYS` (standaard 14 dagen), want daarna valt het record buiten het venster en meldt de run het niet meer. Een tijdelijke fout bij Mollie valt hier niet onder: die stopt de run zonder te boeken (de regel hierboven) |
+| exitcode 1 | de run is gestopt, er is niets half geboekt |
+| exitcode 4 met `N niet te boeken, zie het log` | de rest is wel verwerkt (bij `--dry-run` alleen getoond). Per record staat in het log `Niet geboekt: ... (na een handmatige boeking vastleggen: <kenmerken>)`: een terugboeking of refund die nog niet geboekt is en die het script niet veilig kan boeken (een andere valuta dan euro zonder `settlementAmount`, een refund zonder betaalmethode of een refund waarvan de betaling niet bestaat). Zoek eerst op het kenmerk in Moneybird; staat hij er al, sla het boeken dan over. Anders boek je hem met de hand op de Mollie-rekening, met het eurobedrag uit de afrekening en precies deze omschrijving, zodat de andere rondes hem herkennen: `Mollie Chargeback - <chb_kenmerk> - <tr_kenmerk>` (afschrijving), `Mollie Chargeback Reversed - <chb_kenmerk> - <tr_kenmerk>` (bijschrijving) of `Mollie Refund - <re_kenmerk> - <tr_kenmerk>` (afschrijving). Leg daarna elk genoemd kenmerk vast met `./bin/run.sh --handmatig-geboekt <kenmerk>`; met `--dry-run` erbij schrijft het niets. Het accepteert alleen kenmerken die nu openstaan. Het record blijft gemeld tot het met `--handmatig-geboekt` is vastgelegd, ook als het buiten het venster valt; de logregel noemt het dan `(buiten het venster)`. Voor zo'n record is `--handmatig-geboekt` altijd nodig, ook als het al met de hand in Moneybird staat. Een tijdelijke fout bij Mollie valt hier niet onder: die stopt de run zonder te boeken met exitcode 1 (de regel hierboven) |
 | `Er draait al een run` | een andere run is bezig, exitcode 0, de volgende ronde gaat gewoon door |
-| `Er draait al een run ... De lock is N minuten oud`, exitcode 3 | de lock is langer bezet dan `LOCK_ALERT_MINUTES` (standaard 90). Kijk of het proces met het nummer uit de lockfile nog draait (`ps -p <nummer>`). Draait het niet of is het een ander programma, verwijder dan de lockfile. De lock staat standaard naast de state |
-| `Lockfile ... is niet van een eigen run`, exitcode 3 | de lockfile is een symlink, is van een andere gebruiker of heeft een tijd in de toekomst. Een eigen run maakt zo'n bestand nooit. Kijk wie hem neerzette, verwijder hem en zet de lock in een map waar alleen jij kunt schrijven |
-| `Een vorige run is afgebroken tijdens het schrijven` | zoek de genoemde referentie op in Moneybird. Staat het afschrift er: laat het staan en draai `--aansluiten`. Staat het er niet: draai opnieuw. Daarna `--wis-intentie` |
+| `Er draait al een run ... De lock is N minuten oud`, exitcode 3 | de lock is `LOCK_ALERT_MINUTES` (standaard 90) of langer bezet, ook bij `--handmatig-geboekt`. Het nummer in de lockfile is het proces dat hem vasthoudt: kijk met `ps -p <nummer>` wat het doet en stop het als het vastzit. Verwijder de lockfile niet, want dan kunnen twee runs tegelijk draaien. Stopt het proces, dan is de lock meteen vrij. De lock staat standaard naast de state |
+| `Lockfile ... is niet van een eigen run` of `Lockfile ... is niet te gebruiken`, exitcode 3 | de lockfile is geen gewoon bestand (bijvoorbeeld een map, een symlink of een hardlink), is van een andere gebruiker, heeft een tijd in de toekomst of laat zich niet vergrendelen (de melding noemt de fout, bijvoorbeeld `EACCES` of `ENOLCK`). Meestal zette iemand anders zo'n bestand neer; een klok die meer dan een minuut terugsprong of een back-up met hardlinks kunnen het ook bij de eigen lockfile veroorzaken. Kijk wie of wat het bestand zo achterliet en zet `LOCK_PATH` op een lokale schijf in een map waar alleen deze gebruiker schrijft |
+| `Een vorige run is afgebroken tijdens het schrijven` | zoek de genoemde referentie op in Moneybird. Staat het afschrift er: verwijder het met `--verwijder-afschrift <id>` en wis daarna de intentie met `--wis-intentie`; de volgende ronde boekt de regels opnieuw. Let op: mutaties die al aan een factuur gekoppeld zijn, worden daarmee stil ontkoppeld en die facturen springen terug naar open (zie hieronder). Staat het er niet: wis alleen de intentie. Wis de intentie nooit terwijl het afschrift blijft staan, want dan boekt de volgende ronde die regels dubbel. `--aansluiten` helpt hier niet: het weigert zolang de intentie open staat |
 | `Moneybird nam X van de Y regels aan` | Moneybird verwierp regels. Er is niets als verwerkt weggeschreven, dus na het wegnemen van de oorzaak draait hij gewoon opnieuw |
 | `Poging 1 mislukt (...), opnieuw over ...s` | een leesverzoek mislukte en wordt herhaald. Schrijfverzoeken worden nooit herhaald |
 
@@ -297,12 +310,12 @@ Vier bronnen, elk met zijn eigen boekmoment:
 
 **Datums** staan in Nederlandse tijd, inclusief zomertijd.
 
-**Teruggeboekte incasso's** koppelt `--terugboekingen` aan hun creditnota, op het `chb_`-kenmerk en nooit op het bedrag.
+**Teruggeboekte incasso's** koppelt `--terugboekingen` aan hun creditnota, op het `chb_`-kenmerk en nooit op het bedrag. De creditnota mag tot drie dagen vóór of na de bankregel vallen. Een creditnota met precies hetzelfde kenmerk gaat voor op een die alleen met het kenmerk begint. Zijn er twee kandidaten, dan blijft de regel staan.
 
 **Dubbelbescherming** in drie lagen:
 
 1. Elke verwerkte gebeurtenis staat met zijn eigen sleutel in SQLite. Hij komt daar pas in nadat Moneybird het afschrift heeft bevestigd.
-2. Een lockfile met proces-ID voorkomt dat twee runs elkaar overlappen.
+2. Een lock (`flock`) voorkomt dat twee runs elkaar overlappen. Stopt een run, ook door een crash, dan is de lock meteen vrij.
 3. Schrijfacties worden nooit herhaald bij een serverfout of een time-out, want dan weet je niet of Moneybird het al verwerkt had.
 
 **Het saldo** van de Mollie-rekening in Moneybird is geen goede maatstaf. Het script boekt op de betaaldatum, Mollie rekent later af, dus er staat altijd geld onderweg. Toets met `--controleer`.

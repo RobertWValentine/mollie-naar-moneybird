@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Voert één synchronisatieronde uit."""
 import datetime as dt
+import errno
+import fcntl
 import hashlib
 import logging
 import os
@@ -24,7 +26,7 @@ from .moneybird_client import MoneybirdClient
 from .paypal_client import PaypalClient, eindsaldo
 from .state import State
 from .terugboekingen import is_terugboeking, zoek_creditnota
-from .tijd import lokale_datum
+from .tijd import lokale_datum, utc
 
 log = logging.getLogger(__name__)
 
@@ -43,53 +45,34 @@ class Vergrendeld(RuntimeError):
 class Lock:
     """Voorkomt dat twee runs elkaar overlappen.
 
-    Het aanmaken gebeurt met O_EXCL, zodat twee processen die tegelijk starten
-    niet allebei door kunnen. Een oude lockfile wordt alleen opgeruimd als het
-    proces erin aantoonbaar weg is; een run die langer duurt dan verwacht mag
-    niet door de volgende opzij worden gezet. Bij het opruimen controleren we
-    of de lock nog van ons is.
+    De lock is een `flock` op de lockfile zelf. De kernel geeft hem vrij zodra het
+    proces stopt, ook bij een crash, dus een achtergebleven lockfile houdt niets
+    tegen en hoeft nooit opgeruimd te worden. Het bestand blijft na een run staan:
+    wie het verwijdert terwijl een run loopt, laat de volgende run een nieuw bestand
+    vergrendelen en dan draaien er twee tegelijk. Tijdens een run staat de PID erin.
     """
 
     def __init__(self, pad: str):
         self.pad = pad
-        self.van_ons = False
+        self._fd: int | None = None
 
-    def _draait_nog(self) -> bool:
+    def _leeftijd_minuten(self, fd: int) -> float | None:
         try:
-            with open(self.pad) as f:
-                pid = int(f.read().strip() or 0)
-        except (OSError, ValueError):
-            return False
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-
-    def _leeftijd_minuten(self) -> float | None:
-        try:
-            return (time.time() - os.lstat(self.pad).st_mtime) / 60
+            return (time.time() - os.fstat(fd).st_mtime) / 60
         except OSError:
             return None
 
-    def _vreemd(self) -> str:
-        """Waarom deze lockfile niet van een eigen run kan zijn, of leeg.
+    @staticmethod
+    def _vreemd_stat(st: os.stat_result) -> str:
+        """Waarom een lockfile met deze stat verdacht is, of leeg.
 
         Een eigen run maakt een gewoon bestand, van dezelfde gebruiker, met de
-        tijd van nu. Een symlink, een bestand van een andere gebruiker of een
-        tijd in de toekomst komt van iemand anders; zo'n bestand mag de
-        rondes niet ongemerkt tegenhouden.
+        tijd van nu. Een symlink, een hardlink, een bestand van een andere
+        gebruiker of een tijd in de toekomst is meestal door iemand anders
+        achtergelaten. Een klok die meer dan een minuut terugsprong of een
+        back-up met hardlinks kan dit ook bij de eigen lockfile veroorzaken.
+        Zo'n bestand mag de rondes niet ongemerkt tegenhouden.
         """
-        try:
-            st = os.lstat(self.pad)
-        except FileNotFoundError:
-            return ""
-        except OSError as e:
-            return f"niet te lezen ({e.__class__.__name__})"
         if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
             return "geen gewoon bestand"
         if hasattr(os, "getuid") and st.st_uid != os.getuid():
@@ -98,50 +81,62 @@ class Lock:
             return "met een tijd in de toekomst"
         return ""
 
-    def __enter__(self):
-        os.makedirs(os.path.dirname(os.path.abspath(self.pad)), mode=0o700, exist_ok=True)
-        for poging in (1, 2):
-            try:
-                fd = os.open(self.pad, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
-                vreemd = self._vreemd()
-                if vreemd:
-                    raise Vergrendeld(
-                        f"Lockfile {self.pad} is niet van een eigen run: {vreemd}.",
-                        None, vreemd,
-                    ) from None
-                if self._draait_nog():
-                    raise Vergrendeld(
-                        f"Er draait al een run. Lockfile: {self.pad}",
-                        self._leeftijd_minuten(),
-                    ) from None
-                if poging == 1:
-                    log.warning("Lockfile van een verdwenen proces opgeruimd")
-                    try:
-                        os.remove(self.pad)
-                    except FileNotFoundError:
-                        pass
-                    continue
-                raise Vergrendeld(f"Lockfile blijft bestaan: {self.pad}") from None
-            with os.fdopen(fd, "w") as f:
-                f.write(str(os.getpid()))
-            self.van_ons = True
-            return self
-        raise Vergrendeld(f"Kon de lock niet nemen: {self.pad}")
-
-    def __exit__(self, *_):
-        if not self.van_ons:
-            return
+    def _vreemd(self) -> str:
+        """De toets van `_vreemd_stat` op het pad zelf, zonder een symlink te volgen."""
         try:
-            with open(self.pad) as f:
-                if int(f.read().strip() or 0) != os.getpid():
-                    return
-            os.remove(self.pad)
-        except (OSError, ValueError):
-            pass
+            st = os.lstat(self.pad)
+        except FileNotFoundError:
+            return ""
+        except OSError as e:
+            return f"niet te lezen ({e.__class__.__name__})"
+        return self._vreemd_stat(st)
+
+    def __enter__(self) -> Lock:
+        fd = None
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.pad)), mode=0o700, exist_ok=True)
+            fd = os.open(self.pad, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            vreemd = self._vreemd_stat(os.fstat(fd))
+            if vreemd:
+                os.close(fd)
+                fd = None
+                raise Vergrendeld(
+                    f"Lockfile {self.pad} is niet van een eigen run: {vreemd}.", None, vreemd,
+                )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                minuten = self._leeftijd_minuten(fd)
+                os.close(fd)
+                fd = None
+                raise Vergrendeld(f"Er draait al een run. Lockfile: {self.pad}", minuten) from None
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
+        except OSError as e:
+            if fd is not None:
+                os.close(fd)
+            reden = self._vreemd() or f"lock niet te nemen ({errno.errorcode.get(e.errno, e.errno)})"
+            raise Vergrendeld(
+                f"Lockfile {self.pad} is niet te gebruiken: {reden}.", None, reden,
+            ) from None
+        self._fd = fd
+        return self
+
+    def __exit__(self, *_) -> None:
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        try:
+            os.ftruncate(fd, 0)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 BETALING_WEG = (404, 410)  # de betaling bestaat niet (meer): blijvend, dus per refund melden
+# Zo lang na het begin van de laatste geslaagde ronde mag een regel die de state nog niet kent
+# bij --aansluiten --dry-run wachten. Ligt de import stil, dan telt daarna alles weer als gat.
+RONDE_MAX_LEEFTIJD = dt.timedelta(hours=2)
 
 
 def _sleutels_van(record: dict) -> list:
@@ -167,24 +162,65 @@ def _meld(fouten: list, gezien) -> int:
     return len(open_)
 
 
+def _bewaar_open(fouten: list, state: State) -> None:
+    """Onthoudt de niet te boeken records die nog niet geboekt zijn.
+
+    Zo blijven ze gemeld als ze buiten het venster vallen, tot ze met --handmatig-geboekt
+    zijn vastgelegd of een ronde ze alsnog boekt.
+    """
+    state.onthoud_open([(s, f["melding"]) for f in fouten for s in f["sleutels"]
+                        if not state.gezien(s)])
+
+
+def _met_open_uit_state(fouten: list, state: State, gezien_in_venster: set) -> list:
+    """`fouten` plus de open records uit de state die het venster niet meer laat zien."""
+    in_fouten = {s for f in fouten for s in f["sleutels"]}
+    return fouten + [
+        {"sleutels": [i], "melding": f"{melding} (buiten het venster)"}
+        for i, melding in state.open_niet_geboekt()
+        if i not in in_fouten and i not in gezien_in_venster
+    ]
+
+
+def _ruim_open_op(fouten: list, state: State, gezien_in_venster: set, dry_run: bool) -> list:
+    """Bewaart de nieuwe open records en voegt de oude van buiten het venster toe.
+
+    Een open record dat in het venster zonder fout terugkomt (bijvoorbeeld een refund die
+    een PayPal-betaling bleek), is weer in orde: dat gaat uit de state. Bij een dry run
+    wordt niets geschreven; zo'n record telt dan alleen niet mee.
+    """
+    if dry_run:
+        return _met_open_uit_state(fouten, state, gezien_in_venster)
+    _bewaar_open(fouten, state)
+    in_fouten = {s for f in fouten for s in f["sleutels"]}
+    weer_in_orde = [i for i, _ in state.open_niet_geboekt()
+                    if i in gezien_in_venster and i not in in_fouten]
+    if weer_in_orde:
+        state.vergeet_open(weer_in_orde)
+    return _met_open_uit_state(fouten, state, gezien_in_venster)
+
+
 def open_niet_te_boeken(config: Config, dagen: int | None = None) -> set:
     """De sleutels die nu als niet te boeken openstaan: alleen die mag --handmatig-geboekt vastleggen.
 
     Een geldig maar verkeerd geplakt kenmerk van een gewone, nog niet geboekte refund zou
     die refund anders voorgoed uit de import houden. `dagen` volgt het venster van de ronde
-    die het record meldde (--aansluiten kijkt standaard 30 dagen terug).
+    die het record meldde (--aansluiten kijkt standaard 30 dagen terug). Daarbij komen de open
+    records uit de state, ook die buiten het venster vielen.
     """
     mollie = MollieClient(config.mollie_token)
     state = State(config.state_pad)
     try:
         fouten: list = []
         verzamel(mollie, _grens(dagen or config.max_terugkijk_dagen), fouten, state.gezien)
-        return {s for f in fouten for s in f["sleutels"] if not state.gezien(s)}
+        open_ = {s for f in fouten for s in f["sleutels"] if not state.gezien(s)}
+        return open_ | {i for i, _ in state.open_niet_geboekt()}
     finally:
         state.sluit()
 
 
-def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None, gezien=None) -> list:
+def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None, gezien=None,
+             gezien_in_venster: set | None = None) -> list:
     """Haalt alle boekbare gebeurtenissen op vanaf de grensdatum.
 
     Vier bronnen, elk met zijn eigen moment van boeken. Betalingen worden
@@ -194,13 +230,15 @@ def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None, gezie
 
     Een record dat niet veilig te boeken is (NietTeBoeken) komt met zijn sleutels in
     `fouten` en de rest gaat gewoon door; de aanroeper filtert met `_meld` wat al geboekt
-    is en laat de ronde daarna met exitcode 1 eindigen. `gezien` slaat het ophalen van
-    de betaling over voor een refund die al geboekt is.
+    is en laat de ronde daarna met exitcode 4 eindigen. `gezien` slaat het ophalen van
+    de betaling over voor een refund die al geboekt is. `gezien_in_venster` krijgt de
+    sleutels van elke terugboeking en refund in het venster, met of zonder fout.
     """
     regels: list = []
     aantallen: dict = {}
     fouten = fouten if fouten is not None else []
     gezien = gezien or (lambda sleutel: False)
+    gezien_in_venster = gezien_in_venster if gezien_in_venster is not None else set()
 
     def veilig(functie, record):
         try:
@@ -217,11 +255,13 @@ def verzamel(mollie: MollieClient, grens: str, fouten: list | None = None, gezie
 
     voor = len(regels)
     for chargeback in mollie.chargebacks(grens):
+        gezien_in_venster.update(_sleutels_van(chargeback))
         regels.extend(veilig(van_chargeback, chargeback) or [])
     aantallen["chargebacks"] = len(regels) - voor
 
     voor = len(regels)
     for refund in mollie.refunds(grens):
+        gezien_in_venster.update(_sleutels_van(refund))
         # Zonder settlementAmount (weg per 1 januari 2027) is de betaalmethode nodig;
         # stuurt Mollie de betaling niet mee, dan halen we haar op. Alleen bij een
         # afgeronde refund die nog niet geboekt is.
@@ -268,6 +308,39 @@ def _grens(dagen: int) -> str:
     return (dt.date.today() - dt.timedelta(days=dagen)).isoformat()
 
 
+def _aansluitperiodes(vandaag: dt.date, dagen: int) -> list[str]:
+    """De periodes waarin --aansluiten de mutaties in Moneybird telt en ophaalt, per kalenderjaar.
+
+    Het venster plus een week marge en minstens heel vorig jaar en dit jaar, tot en met
+    morgen (de Nederlandse datum kan een dag voor lopen). Zo ziet de vergelijking ook een
+    regel die met de hand op een oude datum is geboekt. Een groot venster dekt altijd
+    zichzelf. Anders zou een schrijvende ronde zo'n regel nog eens boeken.
+    """
+    begin = min(vandaag - dt.timedelta(days=dagen + 7), dt.date(vandaag.year - 1, 1, 1))
+    eind = vandaag + dt.timedelta(days=1)
+    return [f"{max(begin, dt.date(jaar, 1, 1)):%Y%m%d}..{min(eind, dt.date(jaar, 12, 31)):%Y%m%d}"
+            for jaar in range(begin.year, eind.year + 1)]
+
+
+def _wacht_op_ronde(ontbreekt: list, gezien, laatste: str | None, nu: dt.datetime, dagen: int,
+                    max_terugkijk_dagen: int,
+                    max_leeftijd: dt.timedelta = RONDE_MAX_LEEFTIJD) -> tuple[list, list]:
+    """Splitst de ontbrekende regels in (wacht, ontbreekt).
+
+    Een geslaagde ronde boekt elke regel in zijn venster die de state niet kent. Kent de
+    state een regel dan nog niet, dan is hij na het begin van die ronde zichtbaar geworden:
+    hij wacht op de volgende ronde. Dat geldt alleen vlak na een ronde (`max_leeftijd`) en
+    als het venster niet groter is dan dat van de ronde. Een regel die de state wel kent en
+    die in Moneybird ontbreekt, is een echt gat en wacht nooit. Het tijdstip van de regel
+    speelt geen rol: een refund kan voor de ronde zijn aangemaakt en pas daarna afgerond.
+    """
+    begin = utc(laatste) if laatste else None
+    if begin is None or nu - begin > max_leeftijd or dagen > max_terugkijk_dagen:
+        return [], list(ontbreekt)
+    return ([r for r in ontbreekt if not gezien(r["sleutel"])],
+            [r for r in ontbreekt if gezien(r["sleutel"])])
+
+
 def _referentie(voorvoegsel: str, regels: list) -> str:
     """Een referentie die bij dezelfde inhoud altijd gelijk is.
 
@@ -288,10 +361,11 @@ def _controleer_intentie(state: State) -> None:
     raise RuntimeError(
         f"Een vorige run is afgebroken tijdens het schrijven ({gestart}). Er kan een "
         f"afschrift met referentie '{referentie}' en {aantal} regels in Moneybird "
-        "staan dat niet is onthouden. Zoek dat op: staat het er, verwijder het met "
-        f"--verwijder-afschrift, of laat het staan en draai --aansluiten. Wis daarna "
-        "de intentie met --wis-intentie. Zonder deze controle zouden die regels "
-        "opnieuw geboekt worden."
+        "staan dat niet is onthouden. Zoek die referentie op in Moneybird. Staat het "
+        "afschrift er, verwijder het dan met --verwijder-afschrift <id> en wis daarna "
+        "de intentie met --wis-intentie; de volgende ronde boekt de regels opnieuw. "
+        "Staat het er niet, wis dan alleen de intentie. Wis de intentie nooit terwijl "
+        "het afschrift blijft staan: dan boekt de volgende ronde die regels dubbel."
     )
 
 
@@ -330,13 +404,19 @@ def draai(config: Config, dry_run: bool = False) -> dict:
     state = State(config.state_pad)
     _controleer_intentie(state)
 
+    gestart = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     fouten: list = []
-    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen), fouten, state.gezien)
+    gezien_in_venster: set = set()
+    regels = verzamel(mollie, _grens(config.max_terugkijk_dagen), fouten, state.gezien,
+                      gezien_in_venster=gezien_in_venster)
+    fouten = _ruim_open_op(fouten, state, gezien_in_venster, dry_run)
     niet_te_boeken = _meld(fouten, state.gezien)
     nieuw = [r for r in regels if not state.gezien(r["sleutel"])]
 
     if not nieuw:
         log.info("Niets nieuws.")
+        if not dry_run:
+            state.zet_ronde("mollie", gestart)
         state.sluit()
         return {"regels": 0, "afschrift_id": None, "niet_te_boeken": niet_te_boeken}
 
@@ -350,6 +430,7 @@ def draai(config: Config, dry_run: bool = False) -> dict:
         return {"regels": len(nieuw), "afschrift_id": None, "dry_run": True, "niet_te_boeken": niet_te_boeken}
 
     afschrift_id = _schrijf(moneybird, config, state, nieuw, "mollie")
+    state.zet_ronde("mollie", gestart)
     state.sluit()
     log.info("Afschrift %s aangemaakt met %d regels", afschrift_id, len(nieuw))
     return {"regels": len(nieuw), "afschrift_id": afschrift_id, "niet_te_boeken": niet_te_boeken}
@@ -365,18 +446,22 @@ def aansluiten(
 
     Vergelijkt met wat er feitelijk in de Moneybird-rekening staat, niet met
     een tijdstip. Zo maakt het niet uit of de oude koppeling er halverwege mee
-    ophield of een gat liet.
+    ophield of een gat liet. De mutaties komen per kalenderjaar binnen: het venster plus
+    een week en minstens vorig jaar en dit jaar (`_aansluitperiodes`), voor een droge en
+    een schrijvende ronde gelijk.
+
+    Bij een dry run wacht een regel die de state nog niet kent vlak na een geslaagde
+    ronde op de volgende ronde in plaats van als ontbrekend te tellen (`_wacht_op_ronde`).
     """
     mollie = MollieClient(config.mollie_token)
     moneybird = MoneybirdClient(config.moneybird_token, config.administratie_id)
     state = State(config.state_pad)
     _controleer_intentie(state)
 
-    log.info("Bestaande mutaties ophalen uit Moneybird...")
-    bestaand = moneybird.mutaties(config.rekening_id)
-    log.info("%d mutaties gevonden op rekening %s", len(bestaand), config.rekening_id)
-
-    if not bestaand and not forceer_leeg:
+    periodes = _aansluitperiodes(dt.date.today(), dagen)
+    if not forceer_leeg and sum(
+        moneybird.aantal_mutaties(config.rekening_id, periode) for periode in periodes
+    ) == 0:
         state.sluit()
         raise RuntimeError(
             f"Rekening {config.rekening_id} bevat geen enkele mutatie. Dat wijst op een "
@@ -384,6 +469,12 @@ def aansluiten(
             "die controle zou het hele venster als ontbrekend worden geboekt. Klopt het "
             "dat de rekening leeg is, draai dan met --forceer-leeg."
         )
+
+    log.info("Bestaande mutaties ophalen uit Moneybird...")
+    bestaand: list = []
+    for periode in periodes:
+        bestaand.extend(moneybird.mutaties_in_periode(config.rekening_id, periode))
+    log.info("%d mutaties gevonden op rekening %s", len(bestaand), config.rekening_id)
 
     # Al geboekt is wat in de state staat, of wat met zijn kenmerk al in Moneybird staat.
     # Een terugboeking of refund is een afschrijving, een terugdraaiing een bijschrijving
@@ -395,17 +486,31 @@ def aansluiten(
         kenmerk, _, soort = sleutel.partition(":")
         return state.gezien(sleutel) or (kenmerk, soort == "teruggedraaid") in in_moneybird
 
+    gestart = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     fouten: list = []
-    regels = verzamel(mollie, _grens(dagen), fouten, gezien)
-    niet_te_boeken = _meld(fouten, gezien)
+    gezien_in_venster: set = set()
+    regels = verzamel(mollie, _grens(dagen), fouten, gezien, gezien_in_venster=gezien_in_venster)
+    # Alleen een fout uit dit venster mag hieronder als bestond-al vast. Een open record van
+    # buiten het venster sluit alleen met --handmatig-geboekt of doordat een ronde hem boekt.
+    # Zo'n open record telt ook alleen op de state: een handboeking in Moneybird sluit hem niet.
+    venster_fouten = fouten
+    buiten_venster = _ruim_open_op(fouten, state, gezien_in_venster, dry_run)[len(venster_fouten):]
+    niet_te_boeken = _meld(venster_fouten, gezien) + _meld(buiten_venster, state.gezien)
     geboekt, ontbreekt = splits(regels, bestaand)
-    log.info("Al geboekt: %d. Nog te boeken: %d.", len(geboekt), len(ontbreekt))
+    wacht: list = []
+    if dry_run:
+        wacht, ontbreekt = _wacht_op_ronde(
+            ontbreekt, state.gezien, state.laatste_ronde("mollie"),
+            dt.datetime.now(dt.timezone.utc), dagen, config.max_terugkijk_dagen)
+    log.info("Al geboekt: %d. Nog te boeken: %d. Wacht op de volgende ronde: %d.",
+             len(geboekt), len(ontbreekt), len(wacht))
 
     resultaat = {
         "bestaande_mutaties": len(bestaand),
         "regels": len(regels),
         "al_geboekt": len(geboekt),
         "ontbreekt": len(ontbreekt),
+        "wacht": len(wacht),
         "afschrift_id": None,
         "niet_te_boeken": niet_te_boeken,
     }
@@ -424,7 +529,8 @@ def aansluiten(
 
     # Een niet te boeken record dat al in Moneybird staat, ook in de state vastleggen. Anders
     # meldt de volgende gewone ronde (die alleen de state kent) hem weer als niet geboekt.
-    al_in_moneybird = [s for f in fouten for s in f["sleutels"] if not state.gezien(s) and gezien(s)]
+    al_in_moneybird = [s for f in venster_fouten for s in f["sleutels"]
+                       if not state.gezien(s) and gezien(s)]
     if al_in_moneybird:
         state.markeer(al_in_moneybird, "bestond-al", dt.date.today().isoformat())
 
@@ -434,6 +540,7 @@ def aansluiten(
         log.info("Aansluitafschrift %s met %d regels",
                  resultaat["afschrift_id"], len(ontbreekt))
 
+    state.zet_ronde("mollie", gestart)
     state.sluit()
     return resultaat
 
@@ -534,6 +641,27 @@ def controleer_paypal_saldo(moneybird: MoneybirdClient, config: Config,
             "saldo_paypal": float(saldo_paypal), "verschil": verschil}
 
 
+TERUGBOEKING_MARGE_DAGEN = 3
+
+
+def _facturen_in_venster(moneybird, datum: str, cache: dict,
+                         marge: int = TERUGBOEKING_MARGE_DAGEN) -> list:
+    """De facturen van `datum - marge` tot en met `datum + marge`.
+
+    De creditnota valt niet altijd op de dag van de bankregel. Elke dag wordt
+    binnen een ronde maar één keer opgehaald: overlappende vensters van
+    terugboekingen op naburige dagen kosten zo geen extra verzoeken.
+    """
+    dag = dt.date.fromisoformat(datum)
+    facturen: list = []
+    for verschil in range(-marge, marge + 1):
+        sleutel = (dag + dt.timedelta(days=verschil)).isoformat()
+        if sleutel not in cache:
+            cache[sleutel] = moneybird.verkoopfacturen_van_dag(sleutel)
+        facturen.extend(cache[sleutel])
+    return facturen
+
+
 def koppel_terugboekingen(config: Config, dry_run: bool = False) -> dict:
     """Hangt elke onverwerkte terugboeking aan zijn creditnota.
 
@@ -551,14 +679,13 @@ def koppel_terugboekingen(config: Config, dry_run: bool = False) -> dict:
     log.info("%d onverwerkte terugboekingen", len(openstaand))
     resultaat = {"gevonden": len(openstaand), "gekoppeld": 0, "overgeslagen": []}
 
-    # Per dag hoeven we de facturenlijst maar één keer op te halen, en dat
-    # scheelt op een dag met vier terugboekingen drie keer doorbladeren.
+    # De creditnota zoeken we tot TERUGBOEKING_MARGE_DAGEN vóór en na de
+    # bankregel. Per dag halen we de facturenlijst maar één keer op, ook als
+    # de vensters van terugboekingen op naburige dagen overlappen.
     per_dag: dict = {}
     for mutatie in sorted(openstaand, key=lambda m: m["date"]):
         datum = mutatie["date"]
-        if datum not in per_dag:
-            per_dag[datum] = moneybird.verkoopfacturen_van_dag(datum)
-        nota, reden = zoek_creditnota(mutatie, per_dag[datum])
+        nota, reden = zoek_creditnota(mutatie, _facturen_in_venster(moneybird, datum, per_dag))
 
         if not nota:
             log.warning("  %s %8s laten staan: %s", datum, mutatie["amount"], reden)

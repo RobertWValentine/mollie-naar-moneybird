@@ -29,7 +29,7 @@ Werk ze in deze volgorde af. Na elke stap: vertel kort wat je zag.
 5. **`.env`.** Draai `cp .env.example .env && chmod 600 .env`. Vraag de gebruiker `MOLLIE_TOKEN`, `MONEYBIRD_TOKEN` en `MONEYBIRD_ADMINISTRATION_ID` zelf in te vullen en te melden wanneer dat klaar is.
 6. **Rekening.** Draai `./bin/run.sh --rekeningen`. Laat de lijst zien en vraag welke de Mollie-rekening is. Laat de gebruiker dat ID in `MONEYBIRD_FINANCIAL_ACCOUNT_ID` zetten.
 7. **Oude koppeling.** Vraag naar een bestaande importeur (regel 5 hierboven).
-8. **Droogloop.** Draai `./bin/run.sh --aansluiten --dry-run --dagen 30`. Dat kan een paar minuten duren. Vat samen: hoeveel mutaties er al staan, hoeveel Mollie-regels, hoeveel al geboekt en hoeveel ontbreken. Een klein aantal ontbrekend is normaal. Honderden op een gevulde rekening: stop en overleg.
+8. **Droogloop.** Draai `./bin/run.sh --aansluiten --dry-run --dagen 30`. Dat kan een paar minuten duren. Vat samen: hoeveel mutaties er al staan, hoeveel Mollie-regels, hoeveel al geboekt, hoeveel ontbreken en hoeveel wachten op de volgende ronde (bij een eerste installatie zijn dat er 0). Een klein aantal ontbrekend is normaal. Honderden op een gevulde rekening: stop en overleg.
 9. **Aansluiten.** Pas na een ja: `./bin/run.sh --aansluiten --dagen 30`. Meld het afschrift-ID uit de laatste regel.
 10. **Controleren.** Draai `./bin/run.sh --controleer`. Alle afrekeningen horen `OK` te geven. Een cent verschil is afronding. Vraag de gebruiker in Moneybird te kijken of de betalingen aan hun facturen hangen.
 11. **Automatisch.** Vraag of het elk uur moet draaien en op welk systeem. Gebruik de cron- of launchd-voorbeelden uit de README en vul de echte paden in. Laat het bestand zien voordat je het activeert.
